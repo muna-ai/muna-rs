@@ -1,0 +1,203 @@
+/*
+*   Muna
+*   Copyright © 2026 NatML Inc. All Rights Reserved.
+*/
+
+use std::collections::HashMap;
+use std::pin::Pin;
+
+use futures_core::Stream;
+use reqwest::Method;
+use serde::de::DeserializeOwned;
+use serde::Deserialize;
+
+/// Muna error.
+#[derive(Debug, thiserror::Error)]
+pub enum MunaError {
+    /// API error with HTTP status.
+    #[error("{message}")]
+    Api {
+        message: String,
+        status: u16,
+    },
+    /// HTTP transport error.
+    #[error(transparent)]
+    Http(#[from] reqwest::Error),
+    /// Prediction error.
+    #[error("{0}")]
+    Prediction(String),
+    /// JSON serialization error.
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+    /// Native library error.
+    #[error("{0}")]
+    Native(String),
+}
+
+impl MunaError {
+    pub fn api_status(&self) -> Option<u16> {
+        match self {
+            Self::Api { status, .. } => Some(*status),
+            _ => None,
+        }
+    }
+}
+
+pub type Result<T> = std::result::Result<T, MunaError>;
+
+/// Server-sent event.
+#[derive(Debug, Deserialize)]
+pub struct SseEvent<T> {
+    pub event: String,
+    pub data: T,
+}
+
+/// HTTP request input.
+pub struct RequestInput {
+    pub path: String,
+    pub method: Method,
+    pub headers: Option<HashMap<String, String>>,
+    pub body: Option<serde_json::Value>,
+}
+
+impl RequestInput {
+
+    pub fn get(path: impl Into<String>) -> Self {
+        Self { path: path.into(), method: Method::GET, headers: None, body: None }
+    }
+
+    pub fn post(path: impl Into<String>) -> Self {
+        Self { path: path.into(), method: Method::POST, headers: None, body: None }
+    }
+
+    pub fn delete(path: impl Into<String>) -> Self {
+        Self { path: path.into(), method: Method::DELETE, headers: None, body: None }
+    }
+
+    pub fn body(mut self, body: serde_json::Value) -> Self {
+        self.body = Some(body);
+        self
+    }
+
+    pub fn header(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.get_or_insert_with(HashMap::new).insert(key.into(), value.into());
+        self
+    }
+}
+
+/// Muna API client.
+pub struct MunaClient {
+    /// Muna API URL.
+    pub url: String,
+    auth: String,
+    http: reqwest::Client,
+}
+
+impl MunaClient {
+    const DEFAULT_URL: &'static str = "https://api.muna.ai/v1";
+
+    /// Create a Muna API client.
+    pub fn new(access_key: Option<&str>, url: Option<&str>) -> Self {
+        let access_key = access_key
+            .map(String::from)
+            .or_else(|| std::env::var("MUNA_ACCESS_KEY").ok())
+            .or_else(|| std::env::var("FXN_ACCESS_KEY").ok());
+        let url = url
+            .map(String::from)
+            .or_else(|| std::env::var("MUNA_API_URL").ok())
+            .or_else(|| std::env::var("FXN_API_URL").ok())
+            .unwrap_or_else(|| Self::DEFAULT_URL.to_string());
+        let auth = access_key
+            .map(|key| format!("Bearer {key}"))
+            .unwrap_or_default();
+        Self {
+            url,
+            auth,
+            http: reqwest::Client::new(),
+        }
+    }
+
+    /// Make a request to a REST endpoint.
+    pub async fn request<T: DeserializeOwned>(&self, input: RequestInput) -> Result<T> {
+        let url = format!("{}{}", self.url, input.path);
+        let mut builder = self.http.request(input.method, &url)
+            .header("Authorization", &self.auth);
+        if let Some(headers) = input.headers {
+            for (k, v) in headers {
+                builder = builder.header(k, v);
+            }
+        }
+        if let Some(body) = input.body {
+            builder = builder
+                .header("Content-Type", "application/json")
+                .body(serde_json::to_string(&body)?);
+        }
+        let response = builder.send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let payload: serde_json::Value = response.json().await.unwrap_or_default();
+            let message = payload["errors"][0]["message"]
+                .as_str()
+                .unwrap_or("An unknown error occurred")
+                .to_string();
+            return Err(MunaError::Api { message, status: status.as_u16() });
+        }
+        let result = response.json().await?;
+        Ok(result)
+    }
+
+    /// Make a request and consume the response as a server-sent events stream.
+    pub async fn stream<T: DeserializeOwned + Send + 'static>(
+        &self,
+        input: RequestInput,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<SseEvent<T>>> + Send>>> {
+        let url = format!("{}{}", self.url, input.path);
+        let mut builder = self.http.request(input.method, &url)
+            .header("Authorization", &self.auth);
+        if let Some(headers) = input.headers {
+            for (k, v) in headers {
+                builder = builder.header(k, v);
+            }
+        }
+        if let Some(body) = input.body {
+            builder = builder
+                .header("Content-Type", "application/json")
+                .body(serde_json::to_string(&body)?);
+        }
+        let response = builder.send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let payload: serde_json::Value = response.json().await.unwrap_or_default();
+            let message = payload["errors"][0]["message"]
+                .as_str()
+                .unwrap_or("An unknown error occurred")
+                .to_string();
+            return Err(MunaError::Api { message, status: status.as_u16() });
+        }
+        let stream = async_stream::try_stream! {
+            let mut buffer = String::new();
+            for await chunk in response.bytes_stream() {
+                let chunk = chunk?;
+                buffer.push_str(&String::from_utf8_lossy(&chunk));
+                while let Some(boundary) = buffer.find("\n\n") {
+                    let event_block = buffer[..boundary].to_string();
+                    buffer = buffer[boundary + 2..].to_string();
+                    let mut event_name = String::new();
+                    let mut data = String::new();
+                    for line in event_block.lines() {
+                        if let Some(v) = line.strip_prefix("event:") {
+                            event_name = v.trim().to_string();
+                        } else if let Some(v) = line.strip_prefix("data:") {
+                            data = v.trim().to_string();
+                        }
+                    }
+                    if !data.is_empty() {
+                        let parsed: T = serde_json::from_str(&data)?;
+                        yield SseEvent { event: event_name, data: parsed };
+                    }
+                }
+            }
+        };
+        Ok(Box::pin(stream))
+    }
+}
