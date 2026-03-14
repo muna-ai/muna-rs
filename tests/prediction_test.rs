@@ -68,9 +68,9 @@ async fn test_create_remote_prediction() {
     let _ = dotenvy::dotenv();
     let muna = Muna::default();
     let mut inputs = HashMap::new();
-    inputs.insert("name".to_string(), "Yusuf".into());
+    inputs.insert("sentence".to_string(), "The fat cat sat on the mat.".into());
     let prediction = muna.beta.predictions.remote.create(
-        "@fxn/greeting",
+        "@yusuf/generator",
         &inputs,
         None,
     ).await.unwrap();
