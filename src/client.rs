@@ -4,6 +4,7 @@
 */
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::pin::Pin;
 
 use futures_core::Stream;
@@ -146,6 +147,47 @@ impl MunaClient {
         Ok(result)
     }
 
+    /// Download a resource to a local path.
+    pub async fn download(&self, url: &str, path: &Path) -> Result<()> {
+        use tokio::io::AsyncWriteExt;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| MunaError::Prediction(format!(
+                "Failed to create cache directory: {e}"
+            )))?;
+        }
+        let response = self.http.get(url)
+            .header("Authorization", &self.auth)
+            .send()
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(MunaError::Api {
+                message: format!("Failed to download resource: {status}"),
+                status: status.as_u16(),
+            });
+        }
+        let tmp_path = std::env::temp_dir().join(format!("muna-{}", uuid_v4()));
+        let mut file = tokio::fs::File::create(&tmp_path).await.map_err(|e| {
+            MunaError::Prediction(format!("Failed to create temp file: {e}"))
+        })?;
+        let mut response = response;
+        while let Some(chunk) = response.chunk().await? {
+            file.write_all(&chunk).await.map_err(|e| {
+                MunaError::Prediction(format!("Failed to write chunk: {e}"))
+            })?;
+        }
+        file.flush().await.map_err(|e| {
+            MunaError::Prediction(format!("Failed to flush file: {e}"))
+        })?;
+        drop(file);
+        tokio::fs::rename(&tmp_path, path).await.map_err(|e| {
+            MunaError::Prediction(format!(
+                "Failed to move resource to {}: {e}", path.display()
+            ))
+        })?;
+        Ok(())
+    }
+
     /// Make a request and consume the response as a server-sent events stream.
     pub async fn stream<T: DeserializeOwned + Send + 'static>(
         &self,
@@ -200,4 +242,11 @@ impl MunaClient {
         };
         Ok(Box::pin(stream))
     }
+}
+
+fn uuid_v4() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let r: u64 = (t ^ (t >> 32)) as u64;
+    format!("{:016x}", r)
 }
