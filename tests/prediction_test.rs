@@ -28,7 +28,7 @@ async fn test_create_prediction() {
     let _ = dotenvy::dotenv();
     let muna = Muna::default();
     let mut inputs = HashMap::new();
-    inputs.insert("radius".to_string(), Value::Float(4.0));
+    inputs.insert("radius".to_string(), 4.0f32.into());
     let prediction = muna.predictions.create(
         "@yusuf/area",
         Some(inputs),
@@ -46,7 +46,7 @@ async fn test_stream_prediction() {
     let _ = dotenvy::dotenv();
     let muna = Muna::default();
     let mut inputs = HashMap::new();
-    inputs.insert("sentence".to_string(), Value::String("The fat cat sat on the mat.".to_string()));
+    inputs.insert("sentence".to_string(), "The fat cat sat on the mat.".into());
     let mut stream = muna.predictions.stream(
         "@yusuf/generator",
         inputs,
@@ -68,7 +68,7 @@ async fn test_create_remote_prediction() {
     let _ = dotenvy::dotenv();
     let muna = Muna::default();
     let mut inputs = HashMap::new();
-    inputs.insert("name".to_string(), Value::String("Yusuf".to_string()));
+    inputs.insert("name".to_string(), "Yusuf".into());
     let prediction = muna.beta.predictions.remote.create(
         "@fxn/greeting",
         &inputs,
@@ -84,7 +84,7 @@ async fn test_stream_remote_prediction() {
     let _ = dotenvy::dotenv();
     let muna = Muna::default();
     let mut inputs = HashMap::new();
-    inputs.insert("sentence".to_string(), Value::String("The fat cat sat on the mat.".to_string()));
+    inputs.insert("sentence".to_string(), "The fat cat sat on the mat.".into());
     let mut stream = muna.beta.predictions.remote.stream(
         "@yusuf/generator",
         &inputs,

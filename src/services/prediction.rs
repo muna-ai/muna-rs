@@ -46,9 +46,9 @@ impl PredictionService {
             Some(inputs) => inputs,
             None => return self.create_raw_prediction(tag, client_id, configuration_id).await,
         };
-        let predictor = self.get_predictor(tag, &acceleration, client_id, configuration_id).await?;
-        let mut cache = self.cache.lock().await;
-        let predictor = cache.entry(tag.to_string()).or_insert(predictor);
+        self.load_predictor(tag, &acceleration, client_id, configuration_id).await?;
+        let cache = self.cache.lock().await;
+        let predictor = &cache[tag];
         let input_map = c::ValueMap::from_dict(&inputs)?;
         let prediction = predictor.create_prediction(&input_map)?;
         Ok(Self::to_prediction(tag, &prediction))
@@ -61,10 +61,10 @@ impl PredictionService {
         inputs: HashMap<String, Value>,
         acceleration: Option<Acceleration>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<Prediction>> + Send>>> {
-        let predictor = self.get_predictor(tag, &acceleration, None, None).await?;
+        self.load_predictor(tag, &acceleration, None, None).await?;
         let tag = tag.to_string();
-        let mut cache = self.cache.lock().await;
-        let predictor_ptr = cache.entry(tag.clone()).or_insert(predictor).raw_ptr();
+        let cache = self.cache.lock().await;
+        let predictor_ptr = cache[tag.as_str()].raw_ptr();
         let input_map = c::ValueMap::from_dict(&inputs)?;
         let stream_handle = c::PredictionStream::create(predictor_ptr, &input_map)?;
         drop(cache);
@@ -104,17 +104,17 @@ impl PredictionService {
         self.client.request(RequestInput::post("/predictions").body(body)).await
     }
 
-    async fn get_predictor(
+    async fn load_predictor(
         &self,
         tag: &str,
         acceleration: &Option<Acceleration>,
         client_id: Option<String>,
         configuration_id: Option<String>,
-    ) -> Result<c::Predictor> {
+    ) -> Result<()> {
         {
             let cache = self.cache.lock().await;
             if cache.contains_key(tag) {
-                return Ok(cache[tag].clone_ref());
+                return Ok(());
             }
         }
         let acceleration = acceleration.clone().unwrap_or(Acceleration::LocalAuto);
@@ -138,7 +138,9 @@ impl PredictionService {
             }
         }
         let predictor = c::Predictor::new(&configuration)?;
-        Ok(predictor)
+        let mut cache = self.cache.lock().await;
+        cache.entry(tag.to_string()).or_insert(predictor);
+        Ok(())
     }
 
     fn get_resource_path(&self, resource: &PredictionResource) -> PathBuf {
