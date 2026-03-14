@@ -3,8 +3,8 @@
 *   Copyright © 2026 NatML Inc. All Rights Reserved.
 */
 
+use std::fmt;
 use serde::{Deserialize, Serialize};
-
 use super::{Parameter, User};
 
 /// Predictor access mode.
@@ -63,4 +63,13 @@ pub struct Signature {
     pub inputs: Vec<Parameter>,
     /// Prediction outputs.
     pub outputs: Vec<Parameter>,
+}
+
+impl fmt::Display for Predictor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match serde_json::to_string_pretty(self) {
+            Ok(json) => f.write_str(&json),
+            Err(_) => write!(f, "{:?}", self),
+        }
+    }
 }

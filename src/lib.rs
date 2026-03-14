@@ -33,10 +33,19 @@ impl Muna {
     /// Create a Muna client.
     ///
     /// # Arguments
-    /// * `access_key` - Muna access key. Falls back to `MUNA_ACCESS_KEY` or `FXN_ACCESS_KEY` env var.
+    /// * `access_key` - Muna access key. Falls back to `MUNA_ACCESS_KEY` env var.
     /// * `url` - Muna API URL. Falls back to `MUNA_API_URL` or `FXN_API_URL` env var.
     pub fn new(access_key: Option<&str>, url: Option<&str>) -> Self {
-        let client = Arc::new(MunaClient::new(access_key, url));
+        let access_key = access_key
+            .map(String::from)
+            .or_else(|| std::env::var("MUNA_ACCESS_KEY").ok());
+        let url = url
+            .map(String::from)
+            .or_else(|| std::env::var("MUNA_API_URL").ok());
+        let client = Arc::new(MunaClient::new(
+            access_key.as_deref(),
+            url.as_deref(),
+        ));
         let users = services::UserService::new(client.clone());
         let predictors = services::PredictorService::new(client.clone());
         let predictions = services::PredictionService::new(client.clone());

@@ -99,15 +99,9 @@ impl MunaClient {
 
     /// Create a Muna API client.
     pub fn new(access_key: Option<&str>, url: Option<&str>) -> Self {
-        let access_key = access_key
-            .map(String::from)
-            .or_else(|| std::env::var("MUNA_ACCESS_KEY").ok())
-            .or_else(|| std::env::var("FXN_ACCESS_KEY").ok());
         let url = url
-            .map(String::from)
-            .or_else(|| std::env::var("MUNA_API_URL").ok())
-            .or_else(|| std::env::var("FXN_API_URL").ok())
-            .unwrap_or_else(|| Self::DEFAULT_URL.to_string());
+            .unwrap_or(Self::DEFAULT_URL)
+            .to_string();
         let auth = access_key
             .map(|key| format!("Bearer {key}"))
             .unwrap_or_default();
