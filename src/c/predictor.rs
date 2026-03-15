@@ -15,7 +15,9 @@ pub struct Predictor {
 }
 
 // SAFETY: The native handle is safe to send across threads.
+// Callers are responsible for serializing calls per-model when the backend requires it.
 unsafe impl Send for Predictor {}
+unsafe impl Sync for Predictor {}
 
 impl Predictor {
 

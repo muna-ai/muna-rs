@@ -1,5 +1,5 @@
 ## 0.0.2
-*INCOMPLETE*
++ Updated `muna.predictions.create` method to allow concurrent multi-threaded usage.
 
 ## 0.0.1
 + First pre-release.

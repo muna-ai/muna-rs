@@ -19,6 +19,7 @@ pub struct Value {
 
 // SAFETY: The native handle is safe to send across threads.
 unsafe impl Send for Value {}
+unsafe impl Sync for Value {}
 
 impl Value {
 

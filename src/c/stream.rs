@@ -16,6 +16,7 @@ pub struct PredictionStream {
 
 // SAFETY: The native handle is safe to send across threads.
 unsafe impl Send for PredictionStream {}
+unsafe impl Sync for PredictionStream {}
 
 impl PredictionStream {
 

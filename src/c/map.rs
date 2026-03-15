@@ -19,6 +19,7 @@ pub struct ValueMap {
 
 // SAFETY: The native handle is safe to send across threads.
 unsafe impl Send for ValueMap {}
+unsafe impl Sync for ValueMap {}
 
 impl ValueMap {
 

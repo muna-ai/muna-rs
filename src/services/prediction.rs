@@ -18,7 +18,7 @@ use crate::types::{Acceleration, Prediction, PredictionResource, Value};
 #[derive(Clone)]
 pub struct PredictionService {
     client: Arc<MunaClient>,
-    cache: Arc<tokio::sync::Mutex<HashMap<String, c::Predictor>>>,
+    cache: Arc<tokio::sync::RwLock<HashMap<String, Arc<c::Predictor>>>>,
     cache_dir: PathBuf,
 }
 
@@ -28,7 +28,7 @@ impl PredictionService {
         let cache_dir = get_cache_dir();
         Self {
             client,
-            cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             cache_dir,
         }
     }
@@ -47,8 +47,10 @@ impl PredictionService {
             None => return self.create_raw_prediction(tag, client_id, configuration_id).await,
         };
         self.load_predictor(tag, &acceleration, client_id, configuration_id).await?;
-        let cache = self.cache.lock().await;
-        let predictor = &cache[tag];
+        let predictor = {
+            let cache = self.cache.read().await;
+            cache[tag].clone()
+        };
         let input_map = c::ValueMap::from_dict(&inputs)?;
         let prediction = predictor.create_prediction(&input_map)?;
         Ok(Self::to_prediction(tag, &prediction))
@@ -63,11 +65,12 @@ impl PredictionService {
     ) -> Result<Pin<Box<dyn Stream<Item = Result<Prediction>> + Send>>> {
         self.load_predictor(tag, &acceleration, None, None).await?;
         let tag = tag.to_string();
-        let cache = self.cache.lock().await;
-        let predictor_ptr = cache[tag.as_str()].raw_ptr();
+        let predictor = {
+            let cache = self.cache.read().await;
+            cache[tag.as_str()].clone()
+        };
         let input_map = c::ValueMap::from_dict(&inputs)?;
-        let stream_handle = c::PredictionStream::create(predictor_ptr, &input_map)?;
-        drop(cache);
+        let stream_handle = c::PredictionStream::create(predictor.raw_ptr(), &input_map)?;
         let stream = async_stream::try_stream! {
             for prediction in stream_handle {
                 let prediction = prediction?;
@@ -79,7 +82,7 @@ impl PredictionService {
 
     /// Delete a predictor that is loaded in memory.
     pub async fn delete(&self, tag: &str) -> Result<bool> {
-        let mut cache = self.cache.lock().await;
+        let mut cache = self.cache.write().await;
         Ok(cache.remove(tag).is_some())
     }
 
@@ -112,7 +115,7 @@ impl PredictionService {
         configuration_id: Option<String>,
     ) -> Result<()> {
         {
-            let cache = self.cache.lock().await;
+            let cache = self.cache.read().await;
             if cache.contains_key(tag) {
                 return Ok(());
             }
@@ -138,8 +141,8 @@ impl PredictionService {
             }
         }
         let predictor = c::Predictor::new(&configuration)?;
-        let mut cache = self.cache.lock().await;
-        cache.entry(tag.to_string()).or_insert(predictor);
+        let mut cache = self.cache.write().await;
+        cache.entry(tag.to_string()).or_insert(Arc::new(predictor));
         Ok(())
     }
 
