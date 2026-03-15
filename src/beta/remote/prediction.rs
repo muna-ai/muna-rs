@@ -4,9 +4,7 @@
 */
 
 use std::sync::Arc;
-
 use crate::client::MunaClient;
-
 use super::remote::RemotePredictionService;
 
 /// Beta prediction service exposing remote predictions.

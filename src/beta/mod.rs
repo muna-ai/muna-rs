@@ -4,8 +4,6 @@
 */
 
 mod client;
-pub mod openai;
 pub mod remote;
-pub mod types;
 
 pub use client::*;

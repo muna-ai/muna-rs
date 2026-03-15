@@ -4,7 +4,6 @@
 */
 
 use serde::{Deserialize, Serialize};
-
 use crate::types::Dtype;
 
 /// Serialized remote value.

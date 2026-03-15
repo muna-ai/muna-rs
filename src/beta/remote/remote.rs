@@ -6,15 +6,12 @@
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
-
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use futures_core::Stream;
-
 use crate::c;
 use crate::client::{MunaClient, MunaError, RequestInput, Result, SseEvent};
 use crate::types::{self, Acceleration, Dtype, Prediction, Value};
-
 use super::types::{RemotePrediction, RemoteValue};
 
 /// Make remote predictions.
