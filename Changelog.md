@@ -1,3 +1,6 @@
+## 0.0.3
++ Minor stability improvement.
+
 ## 0.0.2
 + Updated `muna.predictions.create` method to allow concurrent multi-threaded usage.
 

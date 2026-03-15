@@ -16,7 +16,7 @@ pub struct RemoteValue {
 }
 
 /// Remote prediction result.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemotePrediction {
     pub id: String,
     pub tag: String,
@@ -32,7 +32,7 @@ pub struct RemotePrediction {
 }
 
 /// Remote prediction SSE event.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct RemotePredictionEvent {
     pub event: String,
     pub data: RemotePrediction,
