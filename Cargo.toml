@@ -5,6 +5,12 @@ edition = "2021"
 description = "Run prediction functions in your Rust apps."
 license = "Apache-2.0"
 repository = "https://github.com/muna-ai/muna-rs"
+homepage = "https://muna.ai"
+readme = "README.md"
+authors = ["NatML Inc <hi@muna.ai>"]
+keywords = ["ai", "machine-learning", "inference", "prediction"]
+categories = ["artificial-intelligence", "api-bindings"]
+exclude = ["tests/", ".env*", ".vscode/", ".github/"]
 
 [package.metadata.fxnc]
 version = "0.0.42"
