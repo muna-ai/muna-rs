@@ -1,3 +1,6 @@
+## 0.0.5
+*INCOMPLETE*
+
 ## 0.0.4
 + Fixed 403 error when making predictions that have not been cached on the local disk.
 
