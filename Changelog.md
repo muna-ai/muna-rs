@@ -1,3 +1,6 @@
+## 0.0.6
+*INCOMPLETE*
+
 ## 0.0.5
 + Added `muna.beta.openai.embeddings.create` method for using text embedding models via an OpenAI-compatible client.
 
