@@ -105,10 +105,14 @@ impl MunaClient {
         let auth = access_key
             .map(|key| format!("Bearer {key}"))
             .unwrap_or_default();
+        let http = reqwest::Client::builder()
+            .user_agent("muna-rs")
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
         Self {
             url,
             auth,
-            http: reqwest::Client::new(),
+            http,
         }
     }
 
@@ -150,7 +154,6 @@ impl MunaClient {
             )))?;
         }
         let response = self.http.get(url)
-            .header("Authorization", &self.auth)
             .send()
             .await?;
         let status = response.status();
