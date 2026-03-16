@@ -1,5 +1,5 @@
 ## 0.0.5
-*INCOMPLETE*
++ Added `muna.beta.openai.embeddings.create` method for using text embedding models via an OpenAI-compatible client.
 
 ## 0.0.4
 + Fixed 403 error when making predictions that have not been cached on the local disk.
