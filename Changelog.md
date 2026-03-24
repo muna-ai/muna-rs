@@ -1,3 +1,6 @@
+## 0.0.8
+*INCOMPLETE*
+
 ## 0.0.7
 + Updated build script to export `DEP_FUNCTION_LIB_PATH` for path to the Function C library.
 
