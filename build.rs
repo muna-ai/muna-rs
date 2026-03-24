@@ -46,7 +46,13 @@ fn main() {
         println!("cargo:rustc-link-arg=-Wl,-rpath,{}", out_dir.display());
         println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN");
     }
-    println!("cargo:lib_dir={}", out_dir.display());
+    let lib_name = match target_os.as_str() {
+        "macos" => "libFunction.dylib",
+        "linux" => "libFunction.so",
+        "windows" => "Function.dll",
+        _ => panic!("Unsupported platform: {target_os}"),
+    };
+    println!("cargo:lib_path={}", out_dir.join(lib_name).display());
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=Cargo.toml");
 }
