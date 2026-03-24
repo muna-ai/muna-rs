@@ -39,9 +39,14 @@ fn main() {
     }
     println!("cargo:rustc-link-search=native={}", out_dir.display());
     println!("cargo:rustc-link-lib=dylib=Function");
-    if target_os == "macos" || target_os == "linux" {
+    if target_os == "macos" {
         println!("cargo:rustc-link-arg=-Wl,-rpath,{}", out_dir.display());
+        println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path");
+    } else if target_os == "linux" {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,{}", out_dir.display());
+        println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN");
     }
+    println!("cargo:lib_dir={}", out_dir.display());
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=Cargo.toml");
 }

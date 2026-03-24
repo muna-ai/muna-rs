@@ -1,5 +1,5 @@
 ## 0.0.6
-*INCOMPLETE*
++ Updated build script to export `DEP_FUNCTION_LIB_DIR` for path to the Function C library.
 
 ## 0.0.5
 + Added `muna.beta.openai.embeddings.create` method for using text embedding models via an OpenAI-compatible client.
