@@ -1,3 +1,6 @@
+## 0.0.9
+*INCOMPLETE*
+
 ## 0.0.8
 + Added `Parameter.batch` field to inspect inference batching configuration for parameters.
 
