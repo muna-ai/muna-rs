@@ -41,6 +41,9 @@ pub struct Parameter {
     /// Audio sample rate in Hertz.
     #[serde(default)]
     pub sample_rate: Option<u32>,
+    /// Batch configuration for list parameters.
+    #[serde(default)]
+    pub batch: Option<BatchConfig>,
 }
 
 /// Enumeration member value.
@@ -58,4 +61,12 @@ pub struct EnumerationMember {
     pub name: String,
     /// Enumeration member value.
     pub value: EnumerationValue,
+}
+
+/// Batch configuration for list parameters.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchConfig {
+    /// Maximum total item count across all merged requests.
+    pub max_count: usize,
 }

@@ -1,5 +1,5 @@
 ## 0.0.8
-*INCOMPLETE*
++ Added `Parameter.batch` field to inspect inference batching configuration for parameters.
 
 ## 0.0.7
 + Updated build script to export `DEP_FUNCTION_LIB_PATH` for path to the Function C library.
