@@ -26,6 +26,9 @@ pub enum Dtype {
     #[serde(rename = "list")]       List,
     #[serde(rename = "dict")]       Dict,
     #[serde(rename = "image")]      Image,
-    #[serde(rename = "image_list")] ImageList,
-    #[serde(rename = "binary")]     Binary,
+    #[serde(rename = "binary")]      Binary,
+    #[serde(rename = "image_list")]  ImageList,
+    #[serde(rename = "array_list")]  ArrayList,
+    #[serde(rename = "complex64")]   Complex64,
+    #[serde(rename = "complex128")]  Complex128,
 }

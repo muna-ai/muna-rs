@@ -18,23 +18,28 @@ pub enum TensorData {
     Uint16(Vec<u16>),
     Uint32(Vec<u32>),
     Uint64(Vec<u64>),
+    Complex64(Vec<[f32; 2]>),
+    Complex128(Vec<[f64; 2]>),
     Bool(Vec<bool>),
 }
 
 impl TensorData {
+
     pub fn dtype(&self) -> Dtype {
         match self {
-            Self::Float32(_) => Dtype::Float32,
-            Self::Float64(_) => Dtype::Float64,
-            Self::Int8(_)    => Dtype::Int8,
-            Self::Int16(_)   => Dtype::Int16,
-            Self::Int32(_)   => Dtype::Int32,
-            Self::Int64(_)   => Dtype::Int64,
-            Self::Uint8(_)   => Dtype::Uint8,
-            Self::Uint16(_)  => Dtype::Uint16,
-            Self::Uint32(_)  => Dtype::Uint32,
-            Self::Uint64(_)  => Dtype::Uint64,
-            Self::Bool(_)    => Dtype::Bool,
+            Self::Float32(_)    => Dtype::Float32,
+            Self::Float64(_)    => Dtype::Float64,
+            Self::Int8(_)       => Dtype::Int8,
+            Self::Int16(_)      => Dtype::Int16,
+            Self::Int32(_)      => Dtype::Int32,
+            Self::Int64(_)      => Dtype::Int64,
+            Self::Uint8(_)      => Dtype::Uint8,
+            Self::Uint16(_)     => Dtype::Uint16,
+            Self::Uint32(_)     => Dtype::Uint32,
+            Self::Uint64(_)     => Dtype::Uint64,
+            Self::Complex64(_)  => Dtype::Complex64,
+            Self::Complex128(_) => Dtype::Complex128,
+            Self::Bool(_)       => Dtype::Bool,
         }
     }
 
@@ -50,7 +55,9 @@ impl TensorData {
             Self::Uint16(v)  => v.len(),
             Self::Uint32(v)  => v.len(),
             Self::Uint64(v)  => v.len(),
-            Self::Bool(v)    => v.len(),
+            Self::Complex64(v)  => v.len(),
+            Self::Complex128(v) => v.len(),
+            Self::Bool(v)       => v.len(),
         }
     }
 
@@ -70,6 +77,8 @@ impl TensorData {
             Self::Uint16(v)  => v.as_ptr() as *const u8,
             Self::Uint32(v)  => v.as_ptr() as *const u8,
             Self::Uint64(v)  => v.as_ptr() as *const u8,
+            Self::Complex64(v)  => v.as_ptr() as *const u8,
+            Self::Complex128(v) => v.as_ptr() as *const u8,
             Self::Bool(v)    => v.as_ptr() as *const u8,
         }
     }
@@ -111,6 +120,8 @@ pub enum Value {
     Dict(serde_json::Map<String, serde_json::Value>),
     Tensor(Tensor),
     Image(Image),
+    ImageList(Vec<Image>),
+    ArrayList(Vec<Tensor>),
     Binary(Vec<u8>),
 }
 

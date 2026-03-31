@@ -43,7 +43,8 @@ impl Value {
     /// Get the value shape (for tensors and images).
     pub fn shape(&self) -> Result<Option<Vec<i32>>> {
         let dtype = self.dtype()?;
-        if !super::is_tensor_dtype(dtype) && dtype != Dtype::Image && dtype != Dtype::Binary {
+        if !super::is_tensor_dtype(dtype) && dtype != Dtype::Image && dtype != Dtype::Binary
+            && dtype != Dtype::ImageList && dtype != Dtype::ArrayList {
             return Ok(None);
         }
         let mut dims: i32 = 0;
@@ -102,7 +103,9 @@ impl Value {
             Dtype::Uint16  => self.read_tensor::<u16>(data_ptr, |v| types::TensorData::Uint16(v)),
             Dtype::Uint32  => self.read_tensor::<u32>(data_ptr, |v| types::TensorData::Uint32(v)),
             Dtype::Uint64  => self.read_tensor::<u64>(data_ptr, |v| types::TensorData::Uint64(v)),
-            Dtype::Bool    => self.read_bool_tensor(data_ptr),
+            Dtype::Bool       => self.read_bool_tensor(data_ptr),
+            Dtype::Complex64  => self.read_tensor::<[f32; 2]>(data_ptr, |v| types::TensorData::Complex64(v)),
+            Dtype::Complex128 => self.read_tensor::<[f64; 2]>(data_ptr, |v| types::TensorData::Complex128(v)),
             Dtype::String => {
                 let s = unsafe { std::ffi::CStr::from_ptr(data_ptr as *const _) }
                     .to_string_lossy()
@@ -142,6 +145,29 @@ impl Value {
                 let byte_len = shape.first().copied().unwrap_or(0) as usize;
                 let data = unsafe { slice::from_raw_parts(data_ptr as *const u8, byte_len) }.to_vec();
                 Ok(types::Value::Binary(data))
+            }
+            Dtype::ImageList | Dtype::ArrayList => {
+                let shape = self.shape()?.unwrap_or_default();
+                let count = shape.first().copied().unwrap_or(0) as usize;
+                let elements = unsafe { slice::from_raw_parts(data_ptr as *const *mut c_void, count) };
+                let mut values = Vec::with_capacity(count);
+                for &element_ptr in elements {
+                    let element = Value::from_raw(element_ptr, false);
+                    values.push(element.to_object()?);
+                }
+                if dtype == Dtype::ImageList {
+                    let images: std::result::Result<Vec<_>, _> = values.into_iter().map(|v| match v {
+                        types::Value::Image(img) => Ok(img),
+                        _ => Err(crate::client::MunaError::Native("Expected image in image list".into())),
+                    }).collect();
+                    Ok(types::Value::ImageList(images?))
+                } else {
+                    let tensors: std::result::Result<Vec<_>, _> = values.into_iter().map(|v| match v {
+                        types::Value::Tensor(t) => Ok(t),
+                        _ => Err(crate::client::MunaError::Native("Expected tensor in array list".into())),
+                    }).collect();
+                    Ok(types::Value::ArrayList(tensors?))
+                }
             }
             _ => Err(crate::client::MunaError::Native(format!(
                 "Cannot convert value with type `{dtype:?}` to object"
@@ -228,6 +254,8 @@ impl Value {
             }
             types::Value::Image(image) => Self::create_image(image),
             types::Value::Binary(data) => Self::create_binary(data),
+            types::Value::ImageList(images) => Self::create_image_list(images),
+            types::Value::ArrayList(tensors) => Self::create_array_list(tensors),
         }
     }
 
@@ -303,6 +331,49 @@ impl Value {
             )
         };
         check_status(status, "Failed to create image value")?;
+        Ok(Self::from_raw(handle, true))
+    }
+
+    fn create_image_list(images: &[types::Image]) -> Result<Self> {
+        let pixel_buffers: Vec<*const c_void> = images.iter().map(|img| img.data.as_ptr() as *const c_void).collect();
+        let widths: Vec<i32> = images.iter().map(|img| img.width as i32).collect();
+        let heights: Vec<i32> = images.iter().map(|img| img.height as i32).collect();
+        let channels: Vec<i32> = images.iter().map(|img| img.channels as i32).collect();
+        let mut handle = std::ptr::null_mut();
+        let status = unsafe {
+            super::FXNValueCreateImageList(
+                pixel_buffers.as_ptr(),
+                widths.as_ptr(),
+                heights.as_ptr(),
+                channels.as_ptr(),
+                images.len() as i32,
+                ValueFlags::CopyData as i32,
+                &mut handle,
+            )
+        };
+        check_status(status, "Failed to create image list value")?;
+        Ok(Self::from_raw(handle, true))
+    }
+
+    fn create_array_list(tensors: &[types::Tensor]) -> Result<Self> {
+        let data_ptrs: Vec<*const c_void> = tensors.iter().map(|t| t.data.as_ptr() as *const c_void).collect();
+        let shapes: Vec<Vec<i32>> = tensors.iter().map(|t| t.shape.clone()).collect();
+        let shape_ptrs: Vec<*const i32> = shapes.iter().map(|s| s.as_ptr()).collect();
+        let dims: Vec<i32> = tensors.iter().map(|t| t.shape.len() as i32).collect();
+        let dtypes: Vec<i32> = tensors.iter().map(|t| super::dtype_to_c(t.data.dtype())).collect();
+        let mut handle = std::ptr::null_mut();
+        let status = unsafe {
+            super::FXNValueCreateArrayList(
+                data_ptrs.as_ptr(),
+                shape_ptrs.as_ptr(),
+                dims.as_ptr(),
+                dtypes.as_ptr(),
+                tensors.len() as i32,
+                ValueFlags::CopyData as i32,
+                &mut handle,
+            )
+        };
+        check_status(status, "Failed to create array list value")?;
         Ok(Self::from_raw(handle, true))
     }
 

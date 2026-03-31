@@ -153,6 +153,18 @@ fn create_remote_value(value: &Value) -> Result<RemoteValue> {
             let data = upload_value_data(&buffer, "image/png");
             Ok(RemoteValue { data: Some(data), dtype: Dtype::Image })
         }
+        Value::ArrayList(_) => {
+            let fxn_value = c::Value::from_object(value)?;
+            let buffer = fxn_value.serialize(None)?;
+            let data = upload_value_data(&buffer, "application/x-npz");
+            Ok(RemoteValue { data: Some(data), dtype: Dtype::ArrayList })
+        }
+        Value::ImageList(_) => {
+            let fxn_value = c::Value::from_object(value)?;
+            let buffer = fxn_value.serialize(None)?;
+            let data = upload_value_data(&buffer, "image/avif");
+            Ok(RemoteValue { data: Some(data), dtype: Dtype::ImageList })
+        }
         Value::Binary(bytes) => {
             let data = upload_value_data(bytes, "application/octet-stream");
             Ok(RemoteValue { data: Some(data), dtype: Dtype::Binary })
@@ -211,6 +223,14 @@ async fn parse_remote_value(rv: &RemoteValue) -> Result<Value> {
         }
         Dtype::Image => {
             let fxn_value = c::Value::from_bytes(&buffer, "image/*")?;
+            fxn_value.to_object()
+        }
+        Dtype::ArrayList => {
+            let fxn_value = c::Value::from_bytes(&buffer, "application/x-npz")?;
+            fxn_value.to_object()
+        }
+        Dtype::ImageList => {
+            let fxn_value = c::Value::from_bytes(&buffer, "image/avif")?;
             fxn_value.to_object()
         }
         Dtype::Binary => Ok(Value::Binary(buffer)),
