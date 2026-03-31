@@ -1,5 +1,7 @@
 ## 0.0.9
-*INCOMPLETE*
++ Added support for making predictions with lists of tensors.
++ Added support for making predictions with lists of images.
++ Upgraded to Function C 0.0.43.
 
 ## 0.0.8
 + Added `Parameter.batch` field to inspect inference batching configuration for parameters.
