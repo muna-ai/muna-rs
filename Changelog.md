@@ -1,3 +1,6 @@
+## 0.0.10
+*INCOMPLETE*
+
 ## 0.0.9
 + Added support for making predictions with lists of tensors.
 + Added support for making predictions with lists of images.
