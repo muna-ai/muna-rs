@@ -68,10 +68,12 @@ async fn test_create_remote_prediction() {
     let muna = Muna::default();
     let mut inputs = HashMap::new();
     inputs.insert("sentence".to_string(), "The fat cat sat on the mat.".into());
-    let prediction = muna.beta.predictions.remote.create(
+    let prediction = muna.predictions.create(
         "@yusuf/generator",
-        &inputs,
+        Some(inputs),
         None,
+        None,
+        None
     ).await.unwrap();
     assert!(prediction.results.is_some());
     let results = prediction.results.unwrap();
@@ -84,10 +86,10 @@ async fn test_stream_remote_prediction() {
     let muna = Muna::default();
     let mut inputs = HashMap::new();
     inputs.insert("sentence".to_string(), "The fat cat sat on the mat.".into());
-    let mut stream = muna.beta.predictions.remote.stream(
+    let mut stream = muna.predictions.stream(
         "@yusuf/generator",
-        &inputs,
-        None,
+        inputs,
+        Some(muna::Acceleration::RemoteCpu),
     ).await.unwrap();
     let mut count = 0;
     while let Some(prediction) = stream.next().await {

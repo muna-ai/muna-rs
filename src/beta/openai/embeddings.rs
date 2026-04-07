@@ -12,7 +12,6 @@ use crate::client::Result;
 use crate::MunaError;
 use crate::services::{PredictionService, PredictorService};
 use crate::types::{Acceleration, Dtype, Parameter, TensorData, Value};
-use crate::beta::remote::RemotePredictionService;
 use super::schema::{Embedding, EmbeddingCreateResponse, EmbeddingData, EmbeddingUsage};
 use super::utils::get_parameter;
 
@@ -36,7 +35,6 @@ pub enum EncodingFormat {
 pub struct EmbeddingService {
     predictors: PredictorService,
     predictions: PredictionService,
-    remote_predictions: RemotePredictionService,
     cache: Arc<RwLock<HashMap<String, DelegateInfo>>>,
 }
 
@@ -44,13 +42,11 @@ impl EmbeddingService {
 
     pub fn new(
         predictors: PredictorService,
-        predictions: PredictionService,
-        remote_predictions: RemotePredictionService,
+        predictions: PredictionService
     ) -> Self {
         Self {
             predictors,
             predictions,
-            remote_predictions,
             cache: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -94,11 +90,13 @@ impl EmbeddingService {
         let embedding_param_idx = info.embedding_param_idx;
         let usage_param_idx = info.usage_param_idx;
         drop(cache);
-        let prediction = if is_remote(&acceleration) {
-            self.remote_predictions.create(model, &input_map, Some(acceleration)).await?
-        } else {
-            self.predictions.create(model, Some(input_map), Some(acceleration), None, None).await?
-        };
+        let prediction = self.predictions.create(
+            model,
+            Some(input_map),
+            Some(acceleration),
+            None,
+            None
+        ).await?;
         if let Some(ref error) = prediction.error {
             return Err(MunaError::Prediction(error.clone()));
         }
@@ -234,20 +232,4 @@ fn parse_embedding(
         embedding: data,
         index,
     }
-}
-
-fn is_remote(acceleration: &Acceleration) -> bool {
-    matches!(
-        acceleration,
-        Acceleration::RemoteAuto |
-        Acceleration::RemoteCpu |
-        Acceleration::RemoteA10 |
-        Acceleration::RemoteA40 |
-        Acceleration::RemoteA100 |
-        Acceleration::RemoteH200 |
-        Acceleration::RemoteB200
-    ) || matches!(
-        acceleration,
-        Acceleration::Adaptive(s) if s.starts_with("remote_")
-    )
 }

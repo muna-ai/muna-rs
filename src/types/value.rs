@@ -3,6 +3,7 @@
 *   Copyright © 2026 NatML Inc. All Rights Reserved.
 */
 
+use serde::{Deserialize, Serialize};
 use super::Dtype;
 
 /// Tensor data buffer.
@@ -123,6 +124,15 @@ pub enum Value {
     ImageList(Vec<Image>),
     ArrayList(Vec<Tensor>),
     Binary(Vec<u8>),
+}
+
+/// Remote value.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteValue {
+    /// Data URL or base64 data URI.
+    pub data: Option<String>,
+    /// Value data type.
+    pub dtype: Dtype,
 }
 
 impl From<f32> for Value {

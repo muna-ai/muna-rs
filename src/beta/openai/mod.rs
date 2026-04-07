@@ -11,7 +11,6 @@ pub use embeddings::*;
 pub use schema::*;
 
 use crate::services::{PredictionService, PredictorService};
-use crate::beta::remote::RemotePredictionService;
 
 /// Experimental OpenAI client.
 #[derive(Clone)]
@@ -24,11 +23,10 @@ impl OpenAIClient {
 
     pub fn new(
         predictors: PredictorService,
-        predictions: PredictionService,
-        remote_predictions: RemotePredictionService,
+        predictions: PredictionService
     ) -> Self {
         Self {
-            embeddings: EmbeddingService::new(predictors, predictions, remote_predictions),
+            embeddings: EmbeddingService::new(predictors, predictions),
         }
     }
 }

@@ -11,8 +11,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use futures_core::Stream;
 use crate::c;
 use crate::client::{MunaClient, MunaError, RequestInput, Result, SseEvent};
-use crate::types::{self, Acceleration, Dtype, Prediction, Value};
-use super::types::{RemotePrediction, RemoteValue};
+use crate::types::{self, Acceleration, Dtype, Prediction, RemotePrediction, RemoteValue, Value};
 
 /// Make remote predictions.
 #[derive(Clone)]

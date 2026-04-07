@@ -43,8 +43,11 @@ impl Value {
     /// Get the value shape (for tensors and images).
     pub fn shape(&self) -> Result<Option<Vec<i32>>> {
         let dtype = self.dtype()?;
-        if !super::is_tensor_dtype(dtype) && dtype != Dtype::Image && dtype != Dtype::Binary
-            && dtype != Dtype::ImageList && dtype != Dtype::ArrayList {
+        if !super::is_tensor_dtype(dtype) &&
+            dtype != Dtype::Image &&
+            dtype != Dtype::Binary &&
+            dtype != Dtype::ArrayList &&
+            dtype != Dtype::ImageList {
             return Ok(None);
         }
         let mut dims: i32 = 0;

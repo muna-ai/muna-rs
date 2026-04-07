@@ -1,5 +1,8 @@
 ## 0.0.10
-*INCOMPLETE*
++ Added support for remote and adaptive `acceleration` in `muna.preditions.create` method.
++ Removed `muna.beta.predictions.remote.create` method. Use `muna.predictions.create` method instead.
++ Removed `muna.beta.predictions.remote.stream` method. Use `muna.predictions.stream` method instead.
++ Removed `muna.beta.RemoteAcceleration` type. Use `muna.Acceleration` type instead.
 
 ## 0.0.9
 + Added support for making predictions with lists of tensors.
