@@ -1,3 +1,6 @@
+## 0.0.11
+*INCOMPLETE*
+
 ## 0.0.10
 + Added `muna.beta.openai.chat.completions.create` method for creating chat completions with our OpenAI-compatible client.
 + Added `muna.beta.openai.chat.completions.stream`  method for streaming chat completions with our OpenAI-compatible client.
