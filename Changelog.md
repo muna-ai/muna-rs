@@ -1,4 +1,6 @@
 ## 0.0.10
++ Added `muna.beta.openai.chat.completions.create` method for creating chat completions with our OpenAI-compatible client.
++ Added `muna.beta.openai.chat.completions.stream`  method for streaming chat completions with our OpenAI-compatible client.
 + Added support for remote and adaptive `acceleration` in `muna.preditions.create` method.
 + Removed `muna.beta.predictions.remote.create` method. Use `muna.predictions.create` method instead.
 + Removed `muna.beta.predictions.remote.stream` method. Use `muna.predictions.stream` method instead.

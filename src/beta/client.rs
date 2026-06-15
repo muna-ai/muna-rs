@@ -3,10 +3,10 @@
 *   Copyright © 2026 NatML Inc. All Rights Reserved.
 */
 
-use std::sync::Arc;
+use super::openai::OpenAIClient;
 use crate::client::MunaClient;
 use crate::services::{PredictionService, PredictorService};
-use super::openai::OpenAIClient;
+use std::sync::Arc;
 
 /// Client for incubating features.
 #[derive(Clone)]

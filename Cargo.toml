@@ -20,6 +20,7 @@ version = "0.0.43"
 async-stream = "0.3"
 base64 = "0.22"
 futures-core = "0.3"
+futures-util = "0.3"
 home = "0.5.12"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
@@ -33,5 +34,4 @@ ureq = "3"
 
 [dev-dependencies]
 dotenvy = "0.15.7"
-futures-util = "0.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
