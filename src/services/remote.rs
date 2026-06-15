@@ -3,15 +3,15 @@
 *   Copyright © 2026 NatML Inc. All Rights Reserved.
 */
 
-use std::collections::HashMap;
-use std::pin::Pin;
-use std::sync::Arc;
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD as BASE64;
-use futures_core::Stream;
 use crate::c;
 use crate::client::{MunaClient, MunaError, RequestInput, Result, SseEvent};
 use crate::types::{self, Acceleration, Dtype, Prediction, RemotePrediction, RemoteValue, Value};
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
+use futures_core::Stream;
+use std::collections::HashMap;
+use std::pin::Pin;
+use std::sync::Arc;
 
 /// Make remote predictions.
 #[derive(Clone)]
@@ -20,7 +20,6 @@ pub struct RemotePredictionService {
 }
 
 impl RemotePredictionService {
-
     pub fn new(client: Arc<MunaClient>) -> Self {
         Self { client }
     }
@@ -41,10 +40,11 @@ impl RemotePredictionService {
             "acceleration": acceleration,
             "clientId": client_id,
         });
-        let remote: RemotePrediction = self.client.request(
-            RequestInput::post("/predictions/remote").body(body)
-        ).await?;
-        parse_remote_prediction(remote).await
+        let remote: RemotePrediction = self
+            .client
+            .request(RequestInput::post("/predictions/remote").body(body))
+            .await?;
+        parse_remote_prediction(&self.client, remote).await
     }
 
     /// Stream a remote prediction.
@@ -64,13 +64,15 @@ impl RemotePredictionService {
             "clientId": client_id,
             "stream": true,
         });
-        let event_stream = self.client.stream::<RemotePrediction>(
-            RequestInput::post("/predictions/remote").body(body)
-        ).await?;
+        let event_stream = self
+            .client
+            .stream::<RemotePrediction>(RequestInput::post("/predictions/remote").body(body))
+            .await?;
+        let client = self.client.clone();
         let stream = async_stream::try_stream! {
             for await event in event_stream {
                 let event: SseEvent<RemotePrediction> = event?;
-                let prediction = parse_remote_prediction(event.data).await?;
+                let prediction = parse_remote_prediction(&client, event.data).await?;
                 yield prediction;
             }
         };
@@ -89,7 +91,10 @@ fn serialize_inputs(inputs: &HashMap<String, Value>) -> Result<serde_json::Value
 
 fn create_remote_value(value: &Value) -> Result<RemoteValue> {
     match value {
-        Value::Null => Ok(RemoteValue { data: None, dtype: Dtype::Null }),
+        Value::Null => Ok(RemoteValue {
+            data: None,
+            dtype: Dtype::Null,
+        }),
         Value::Float(v) => {
             let tensor = types::Tensor {
                 data: types::TensorData::Float32(vec![*v]),
@@ -130,43 +135,67 @@ fn create_remote_value(value: &Value) -> Result<RemoteValue> {
             let buffer = fxn_value.serialize(None)?;
             let data = upload_value_data(&buffer, "application/octet-stream");
             let dtype = tensor.data.dtype();
-            Ok(RemoteValue { data: Some(data), dtype })
+            Ok(RemoteValue {
+                data: Some(data),
+                dtype,
+            })
         }
         Value::String(s) => {
             let data = upload_value_data(s.as_bytes(), "text/plain");
-            Ok(RemoteValue { data: Some(data), dtype: Dtype::String })
+            Ok(RemoteValue {
+                data: Some(data),
+                dtype: Dtype::String,
+            })
         }
         Value::List(v) => {
             let json = serde_json::to_string(v)?;
             let data = upload_value_data(json.as_bytes(), "application/json");
-            Ok(RemoteValue { data: Some(data), dtype: Dtype::List })
+            Ok(RemoteValue {
+                data: Some(data),
+                dtype: Dtype::List,
+            })
         }
         Value::Dict(v) => {
             let json = serde_json::to_string(v)?;
             let data = upload_value_data(json.as_bytes(), "application/json");
-            Ok(RemoteValue { data: Some(data), dtype: Dtype::Dict })
+            Ok(RemoteValue {
+                data: Some(data),
+                dtype: Dtype::Dict,
+            })
         }
         Value::Image(_) => {
             let fxn_value = c::Value::from_object(value)?;
             let buffer = fxn_value.serialize(None)?;
             let data = upload_value_data(&buffer, "image/png");
-            Ok(RemoteValue { data: Some(data), dtype: Dtype::Image })
+            Ok(RemoteValue {
+                data: Some(data),
+                dtype: Dtype::Image,
+            })
         }
         Value::ArrayList(_) => {
             let fxn_value = c::Value::from_object(value)?;
             let buffer = fxn_value.serialize(None)?;
             let data = upload_value_data(&buffer, "application/x-npz");
-            Ok(RemoteValue { data: Some(data), dtype: Dtype::ArrayList })
+            Ok(RemoteValue {
+                data: Some(data),
+                dtype: Dtype::ArrayList,
+            })
         }
         Value::ImageList(_) => {
             let fxn_value = c::Value::from_object(value)?;
             let buffer = fxn_value.serialize(None)?;
             let data = upload_value_data(&buffer, "image/avif");
-            Ok(RemoteValue { data: Some(data), dtype: Dtype::ImageList })
+            Ok(RemoteValue {
+                data: Some(data),
+                dtype: Dtype::ImageList,
+            })
         }
         Value::Binary(bytes) => {
             let data = upload_value_data(bytes, "application/octet-stream");
-            Ok(RemoteValue { data: Some(data), dtype: Dtype::Binary })
+            Ok(RemoteValue {
+                data: Some(data),
+                dtype: Dtype::Binary,
+            })
         }
     }
 }
@@ -176,27 +205,29 @@ fn upload_value_data(buffer: &[u8], mime: &str) -> String {
     format!("data:{mime};base64,{encoded}")
 }
 
-async fn download_value_data(url: &str) -> Result<Vec<u8>> {
+async fn download_value_data(client: &MunaClient, url: &str) -> Result<Vec<u8>> {
     if let Some(data_part) = url.strip_prefix("data:") {
         if let Some((_mime, encoded)) = data_part.split_once(";base64,") {
-            let bytes = BASE64.decode(encoded)
+            let bytes = BASE64
+                .decode(encoded)
                 .map_err(|e| MunaError::Prediction(format!("Base64 decode error: {e}")))?;
             return Ok(bytes);
         }
     }
-    let response = reqwest::get(url).await?;
+    let response = client.download(url).await?;
     let bytes = response.bytes().await?;
     Ok(bytes.to_vec())
 }
 
-async fn parse_remote_value(rv: &RemoteValue) -> Result<Value> {
+async fn parse_remote_value(client: &MunaClient, rv: &RemoteValue) -> Result<Value> {
     if rv.dtype == Dtype::Null {
         return Ok(Value::Null);
     }
-    let url = rv.data.as_deref().ok_or_else(|| {
-        MunaError::Prediction("Remote value has no data URL".into())
-    })?;
-    let buffer = download_value_data(url).await?;
+    let url = rv
+        .data
+        .as_deref()
+        .ok_or_else(|| MunaError::Prediction("Remote value has no data URL".into()))?;
+    let buffer = download_value_data(client, url).await?;
     match rv.dtype {
         Dtype::Null => Ok(Value::Null),
         dtype if c::is_tensor_dtype(dtype) => {
@@ -239,12 +270,15 @@ async fn parse_remote_value(rv: &RemoteValue) -> Result<Value> {
     }
 }
 
-async fn parse_remote_prediction(prediction: RemotePrediction) -> Result<Prediction> {
+async fn parse_remote_prediction(
+    client: &MunaClient,
+    prediction: RemotePrediction,
+) -> Result<Prediction> {
     let results = match prediction.results {
         Some(remote_values) => {
             let mut values = Vec::with_capacity(remote_values.len());
             for rv in &remote_values {
-                values.push(parse_remote_value(rv).await?);
+                values.push(parse_remote_value(client, rv).await?);
             }
             Some(values)
         }

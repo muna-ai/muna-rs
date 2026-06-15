@@ -1,5 +1,5 @@
 ## 0.0.11
-*INCOMPLETE*
++ Minor stability improvements.
 
 ## 0.0.10
 + Added `muna.beta.openai.chat.completions.create` method for creating chat completions with our OpenAI-compatible client.
