@@ -5,10 +5,9 @@
 
 use futures_core::Stream;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio::io::AsyncWriteExt;
 
 use crate::c;
 use crate::client::{MunaClient, MunaError, RequestInput, Result};
@@ -54,7 +53,7 @@ impl LocalPredictionService {
             let prediction = self
                 .create_raw_prediction(tag, client_id, configuration_id)
                 .await?;
-            self.download_prediction_resources(&prediction).await?;
+            self.create_cached_prediction(&prediction).await?;
             return Ok(prediction);
         }
         self.load_predictor(tag, &acceleration, client_id, configuration_id)
@@ -137,6 +136,7 @@ impl LocalPredictionService {
         let prediction = self
             .create_raw_prediction(tag, client_id, configuration_id)
             .await?;
+        let prediction = self.create_cached_prediction(&prediction).await?;
         let config_token = prediction.configuration.as_deref().ok_or_else(|| {
             MunaError::Prediction(format!(
                 "Failed to create {tag} prediction because configuration token is missing"
@@ -146,8 +146,10 @@ impl LocalPredictionService {
         configuration.set_tag(tag)?;
         configuration.set_token(&config_token)?;
         configuration.set_acceleration(c::acceleration_to_c(&acceleration))?;
-        for (kind, path) in self.download_prediction_resources(&prediction).await? {
-            configuration.add_resource(&kind, path.to_string_lossy().as_ref())?;
+        if let Some(resources) = &prediction.resources {
+            for resource in resources {
+                configuration.add_resource(&resource.kind, &resource.url)?;
+            }
         }
         let predictor = c::Predictor::new(&configuration)?;
         let mut cache = self.cache.write().await;
@@ -169,50 +171,36 @@ impl LocalPredictionService {
         path
     }
 
-    async fn download_prediction_resources(
-        &self,
-        prediction: &Prediction,
-    ) -> Result<Vec<(String, PathBuf)>> {
-        let mut paths = Vec::new();
-        if let Some(resources) = &prediction.resources {
-            for resource in resources {
-                let path = self.get_resource_path(resource);
-                if !path.exists() {
-                    self.download_resource(&resource.url, &path).await?;
+    /// Download a prediction's resources and return a new prediction whose
+    /// resource URLs point to the downloaded local paths.
+    async fn create_cached_prediction(&self, prediction: &Prediction) -> Result<Prediction> {
+        let resources = match &prediction.resources {
+            Some(resources) => {
+                let mut materialized = Vec::with_capacity(resources.len());
+                for resource in resources {
+                    materialized.push(self.download_resource(resource).await?);
                 }
-                paths.push((resource.kind.clone(), path));
+                Some(materialized)
             }
-        }
-        Ok(paths)
+            None => None,
+        };
+        Ok(Prediction {
+            resources,
+            ..prediction.clone()
+        })
     }
 
-    async fn download_resource(&self, url: &str, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                MunaError::Prediction(format!("Failed to create cache directory: {e}"))
-            })?;
+    /// Download a single resource and return it with its URL set to the local
+    /// downloaded path.
+    async fn download_resource(&self, resource: &PredictionResource) -> Result<PredictionResource> {
+        let path = self.get_resource_path(resource);
+        if !path.exists() {
+            self.client.download(&resource.url, &path).await?;
         }
-        let tmp_path = std::env::temp_dir().join(format!("muna-{}", uuid_v4()));
-        let mut file = tokio::fs::File::create(&tmp_path)
-            .await
-            .map_err(|e| MunaError::Prediction(format!("Failed to create temp file: {e}")))?;
-        let mut response = self.client.download(url).await?;
-        while let Some(chunk) = response.chunk().await? {
-            file.write_all(&chunk)
-                .await
-                .map_err(|e| MunaError::Prediction(format!("Failed to write chunk: {e}")))?;
-        }
-        file.flush()
-            .await
-            .map_err(|e| MunaError::Prediction(format!("Failed to flush file: {e}")))?;
-        drop(file);
-        tokio::fs::rename(&tmp_path, path).await.map_err(|e| {
-            MunaError::Prediction(format!(
-                "Failed to move resource to {}: {e}",
-                path.display()
-            ))
-        })?;
-        Ok(())
+        Ok(PredictionResource {
+            url: path.to_string_lossy().into_owned(),
+            ..resource.clone()
+        })
     }
 }
 
@@ -271,13 +259,4 @@ fn chrono_now() -> String {
         .unwrap_or_default()
         .as_secs();
     format!("{secs}")
-}
-
-fn uuid_v4() -> String {
-    let t = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let r: u64 = (t ^ (t >> 32)) as u64;
-    format!("{:016x}", r)
 }

@@ -1,3 +1,6 @@
+## 0.0.12
++ Improved prediction resource download speeds.
+
 ## 0.0.11
 + Minor stability improvements.
 

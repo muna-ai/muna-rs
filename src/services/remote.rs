@@ -214,9 +214,15 @@ async fn download_value_data(client: &MunaClient, url: &str) -> Result<Vec<u8>> 
             return Ok(bytes);
         }
     }
-    let response = client.download(url).await?;
-    let bytes = response.bytes().await?;
-    Ok(bytes.to_vec())
+    let response = client.http().get(url).send().await?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(MunaError::Api {
+            message: format!("Failed to download resource: {status}"),
+            status: status.as_u16(),
+        });
+    }
+    Ok(response.bytes().await?.to_vec())
 }
 
 async fn parse_remote_value(client: &MunaClient, rv: &RemoteValue) -> Result<Value> {
