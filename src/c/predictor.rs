@@ -48,6 +48,7 @@ impl Predictor {
 }
 
 impl Drop for Predictor {
+
     fn drop(&mut self) {
         if !self.handle.is_null() {
             unsafe { super::FXNPredictorRelease(self.handle) };

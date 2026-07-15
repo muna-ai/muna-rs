@@ -15,13 +15,13 @@ pub enum Acceleration {
     #[serde(rename = "local_auto")]
     LocalAuto,
     /// Run locally on the CPU.
-    #[serde(rename = "local_cpu")] 
+    #[serde(rename = "local_cpu")]
     LocalCpu,
     /// Run locally on the GPU.
-    #[serde(rename = "local_gpu")] 
+    #[serde(rename = "local_gpu")]
     LocalGpu,
     /// Run locally on the NPU.
-    #[serde(rename = "local_npu")] 
+    #[serde(rename = "local_npu")]
     LocalNpu,
     /// Run remotely with automatic hardware selection.
     #[serde(rename = "remote_auto")]

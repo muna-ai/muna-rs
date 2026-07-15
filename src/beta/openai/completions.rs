@@ -126,46 +126,35 @@ impl ChatCompletionService {
             .map(serde_json::to_value)
             .collect::<std::result::Result<Vec<_>, _>>()?;
         input_map.insert(info.input_param_name, Value::List(messages));
-        if let (
-            Some(value),
-            Some(name)
-        ) = (params.response_format, info.response_format_param_name) {
+        if let (Some(value), Some(name)) = (params.response_format, info.response_format_param_name)
+        {
             input_map.insert(name, Value::Dict(value));
         }
-        if let (
-            Some(value),
-            Some(name)
-        ) = (params.reasoning_effort, info.reasoning_effort_param_name) {
+        if let (Some(value), Some(name)) =
+            (params.reasoning_effort, info.reasoning_effort_param_name)
+        {
             input_map.insert(name, Value::String(value.as_str().to_string()));
         }
-        if let (
-            Some(value),
-            Some(name)
-        ) = (params.max_completion_tokens, info.max_output_tokens_param_name) {
+        if let (Some(value), Some(name)) = (
+            params.max_completion_tokens,
+            info.max_output_tokens_param_name,
+        ) {
             input_map.insert(name, Value::Int(value));
         }
-        if let (
-            Some(value),
-            Some(name)
-        ) = (params.temperature, info.temperature_param_name) {
+        if let (Some(value), Some(name)) = (params.temperature, info.temperature_param_name) {
             input_map.insert(name, Value::Float(value));
         }
-        if let (
-            Some(value),
-            Some(name)
-        ) = (params.top_p, info.top_p_param_name) {
+        if let (Some(value), Some(name)) = (params.top_p, info.top_p_param_name) {
             input_map.insert(name, Value::Float(value));
         }
-        if let (
-            Some(value),
-            Some(name)
-        ) = (params.frequency_penalty, info.frequency_penalty_param_name) {
+        if let (Some(value), Some(name)) =
+            (params.frequency_penalty, info.frequency_penalty_param_name)
+        {
             input_map.insert(name, Value::Float(value));
         }
-        if let (
-            Some(value),
-            Some(name)
-        ) = (params.presence_penalty, info.presence_penalty_param_name) {
+        if let (Some(value), Some(name)) =
+            (params.presence_penalty, info.presence_penalty_param_name)
+        {
             input_map.insert(name, Value::Float(value));
         }
         let acceleration = params.acceleration.unwrap_or(Acceleration::LocalAuto);
@@ -230,37 +219,51 @@ impl ChatCompletionService {
             &signature.inputs,
             &[Dtype::Dict],
             Some("openai.chat.completions.response_format"),
-        ).1.map(|p| p.name.clone());
+        )
+        .1
+        .map(|p| p.name.clone());
         let reasoning_effort_param_name = get_parameter(
             &signature.inputs,
             &[Dtype::String],
             Some("openai.chat.completions.reasoning_effort"),
-        ).1.map(|p| p.name.clone());
+        )
+        .1
+        .map(|p| p.name.clone());
         let max_output_tokens_param_name = get_parameter(
             &signature.inputs,
             &int_dtypes,
             Some("openai.chat.completions.max_output_tokens"),
-        ).1.map(|p| p.name.clone());
+        )
+        .1
+        .map(|p| p.name.clone());
         let temperature_param_name = get_parameter(
             &signature.inputs,
             &float_dtypes,
             Some("openai.chat.completions.temperature"),
-        ).1.map(|p| p.name.clone());
+        )
+        .1
+        .map(|p| p.name.clone());
         let top_p_param_name = get_parameter(
             &signature.inputs,
             &float_dtypes,
             Some("openai.chat.completions.top_p"),
-        ).1.map(|p| p.name.clone());
+        )
+        .1
+        .map(|p| p.name.clone());
         let frequency_penalty_param_name = get_parameter(
             &signature.inputs,
             &float_dtypes,
             Some("openai.chat.completions.frequency_penalty"),
-        ).1.map(|p| p.name.clone());
+        )
+        .1
+        .map(|p| p.name.clone());
         let presence_penalty_param_name = get_parameter(
             &signature.inputs,
             &float_dtypes,
             Some("openai.chat.completions.presence_penalty"),
-        ).1.map(|p| p.name.clone());
+        )
+        .1
+        .map(|p| p.name.clone());
         let completion_param_idx = signature
             .outputs
             .iter()

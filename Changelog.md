@@ -1,5 +1,5 @@
 ## 0.0.13
-*INCOMPLETE*
++ Upgraded to Function C 0.0.48.
 
 ## 0.0.12
 + Improved prediction resource download speeds.

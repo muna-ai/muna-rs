@@ -43,11 +43,12 @@ impl Value {
     /// Get the value shape (for tensors and images).
     pub fn shape(&self) -> Result<Option<Vec<i32>>> {
         let dtype = self.dtype()?;
-        if !super::is_tensor_dtype(dtype) &&
-            dtype != Dtype::Image &&
-            dtype != Dtype::Binary &&
-            dtype != Dtype::ArrayList &&
-            dtype != Dtype::ImageList {
+        if !super::is_tensor_dtype(dtype)
+            && dtype != Dtype::Image
+            && dtype != Dtype::Binary
+            && dtype != Dtype::ArrayList
+            && dtype != Dtype::ImageList
+        {
             return Ok(None);
         }
         let mut dims: i32 = 0;
@@ -74,14 +75,14 @@ impl Value {
             .transpose()?;
         let mime_ptr = mime_c.as_ref().map_or(std::ptr::null(), |c| c.as_ptr());
         let mut serialized = std::ptr::null_mut();
-        let status = unsafe { super::FXNValueCreateSerializedValue(self.handle, mime_ptr, &mut serialized) };
+        let status = unsafe {
+            super::FXNValueCreateSerializedValue(self.handle, mime_ptr, &mut serialized)
+        };
         check_status(status, "Failed to serialize value")?;
         let serialized_value = Value::from_raw(serialized, true);
         let data_ptr = serialized_value.data_ptr()?;
         let shape = serialized_value.shape()?;
-        let byte_len = shape
-            .and_then(|s| s.first().copied())
-            .unwrap_or(0) as usize;
+        let byte_len = shape.and_then(|s| s.first().copied()).unwrap_or(0) as usize;
         let bytes = if byte_len > 0 && !data_ptr.is_null() {
             unsafe { slice::from_raw_parts(data_ptr as *const u8, byte_len) }.to_vec()
         } else {
@@ -98,17 +99,21 @@ impl Value {
             Dtype::Null => Ok(types::Value::Null),
             Dtype::Float32 => self.read_tensor::<f32>(data_ptr, |v| types::TensorData::Float32(v)),
             Dtype::Float64 => self.read_tensor::<f64>(data_ptr, |v| types::TensorData::Float64(v)),
-            Dtype::Int8    => self.read_tensor::<i8>(data_ptr, |v| types::TensorData::Int8(v)),
-            Dtype::Int16   => self.read_tensor::<i16>(data_ptr, |v| types::TensorData::Int16(v)),
-            Dtype::Int32   => self.read_tensor::<i32>(data_ptr, |v| types::TensorData::Int32(v)),
-            Dtype::Int64   => self.read_tensor::<i64>(data_ptr, |v| types::TensorData::Int64(v)),
-            Dtype::Uint8   => self.read_tensor::<u8>(data_ptr, |v| types::TensorData::Uint8(v)),
-            Dtype::Uint16  => self.read_tensor::<u16>(data_ptr, |v| types::TensorData::Uint16(v)),
-            Dtype::Uint32  => self.read_tensor::<u32>(data_ptr, |v| types::TensorData::Uint32(v)),
-            Dtype::Uint64  => self.read_tensor::<u64>(data_ptr, |v| types::TensorData::Uint64(v)),
-            Dtype::Bool       => self.read_bool_tensor(data_ptr),
-            Dtype::Complex64  => self.read_tensor::<[f32; 2]>(data_ptr, |v| types::TensorData::Complex64(v)),
-            Dtype::Complex128 => self.read_tensor::<[f64; 2]>(data_ptr, |v| types::TensorData::Complex128(v)),
+            Dtype::Int8 => self.read_tensor::<i8>(data_ptr, |v| types::TensorData::Int8(v)),
+            Dtype::Int16 => self.read_tensor::<i16>(data_ptr, |v| types::TensorData::Int16(v)),
+            Dtype::Int32 => self.read_tensor::<i32>(data_ptr, |v| types::TensorData::Int32(v)),
+            Dtype::Int64 => self.read_tensor::<i64>(data_ptr, |v| types::TensorData::Int64(v)),
+            Dtype::Uint8 => self.read_tensor::<u8>(data_ptr, |v| types::TensorData::Uint8(v)),
+            Dtype::Uint16 => self.read_tensor::<u16>(data_ptr, |v| types::TensorData::Uint16(v)),
+            Dtype::Uint32 => self.read_tensor::<u32>(data_ptr, |v| types::TensorData::Uint32(v)),
+            Dtype::Uint64 => self.read_tensor::<u64>(data_ptr, |v| types::TensorData::Uint64(v)),
+            Dtype::Bool => self.read_bool_tensor(data_ptr),
+            Dtype::Complex64 => {
+                self.read_tensor::<[f32; 2]>(data_ptr, |v| types::TensorData::Complex64(v))
+            }
+            Dtype::Complex128 => {
+                self.read_tensor::<[f64; 2]>(data_ptr, |v| types::TensorData::Complex128(v))
+            }
             Dtype::String => {
                 let s = unsafe { std::ffi::CStr::from_ptr(data_ptr as *const _) }
                     .to_string_lossy()
@@ -134,41 +139,60 @@ impl Value {
             Dtype::Image => {
                 let shape = self.shape()?.unwrap_or_default();
                 if shape.len() < 2 {
-                    return Err(crate::client::MunaError::Native("Invalid image shape".into()));
+                    return Err(crate::client::MunaError::Native(
+                        "Invalid image shape".into(),
+                    ));
                 }
                 let height = shape[0] as u32;
                 let width = shape[1] as u32;
                 let channels = if shape.len() > 2 { shape[2] as u32 } else { 1 };
                 let byte_len = (height * width * channels) as usize;
                 let data = unsafe { slice::from_raw_parts(data_ptr as *const u8, byte_len) }.to_vec();
-                Ok(types::Value::Image(types::Image { data, width, height, channels }))
+                Ok(types::Value::Image(types::Image {
+                    data,
+                    width,
+                    height,
+                    channels,
+                }))
             }
             Dtype::Binary => {
                 let shape = self.shape()?.unwrap_or_default();
                 let byte_len = shape.first().copied().unwrap_or(0) as usize;
-                let data = unsafe { slice::from_raw_parts(data_ptr as *const u8, byte_len) }.to_vec();
+                let data =
+                    unsafe { slice::from_raw_parts(data_ptr as *const u8, byte_len) }.to_vec();
                 Ok(types::Value::Binary(data))
             }
             Dtype::ImageList | Dtype::ArrayList => {
                 let shape = self.shape()?.unwrap_or_default();
                 let count = shape.first().copied().unwrap_or(0) as usize;
-                let elements = unsafe { slice::from_raw_parts(data_ptr as *const *mut c_void, count) };
+                let elements =
+                    unsafe { slice::from_raw_parts(data_ptr as *const *mut c_void, count) };
                 let mut values = Vec::with_capacity(count);
                 for &element_ptr in elements {
                     let element = Value::from_raw(element_ptr, false);
                     values.push(element.to_object()?);
                 }
                 if dtype == Dtype::ImageList {
-                    let images: std::result::Result<Vec<_>, _> = values.into_iter().map(|v| match v {
-                        types::Value::Image(img) => Ok(img),
-                        _ => Err(crate::client::MunaError::Native("Expected image in image list".into())),
-                    }).collect();
+                    let images: std::result::Result<Vec<_>, _> = values
+                        .into_iter()
+                        .map(|v| match v {
+                            types::Value::Image(img) => Ok(img),
+                            _ => Err(crate::client::MunaError::Native(
+                                "Expected image in image list".into(),
+                            )),
+                        })
+                        .collect();
                     Ok(types::Value::ImageList(images?))
                 } else {
-                    let tensors: std::result::Result<Vec<_>, _> = values.into_iter().map(|v| match v {
-                        types::Value::Tensor(t) => Ok(t),
-                        _ => Err(crate::client::MunaError::Native("Expected tensor in array list".into())),
-                    }).collect();
+                    let tensors: std::result::Result<Vec<_>, _> = values
+                        .into_iter()
+                        .map(|v| match v {
+                            types::Value::Tensor(t) => Ok(t),
+                            _ => Err(crate::client::MunaError::Native(
+                                "Expected tensor in array list".into(),
+                            )),
+                        })
+                        .collect();
                     Ok(types::Value::ArrayList(tensors?))
                 }
             }
@@ -265,7 +289,8 @@ impl Value {
     /// Create a value from serialized bytes.
     pub fn from_bytes(data: &[u8], mime: &str) -> Result<Self> {
         let binary = Self::create_binary(data)?;
-        let mime_c = CString::new(mime).map_err(|e| crate::client::MunaError::Native(e.to_string()))?;
+        let mime_c =
+            CString::new(mime).map_err(|e| crate::client::MunaError::Native(e.to_string()))?;
         let mut handle = std::ptr::null_mut();
         let status = unsafe {
             super::FXNValueCreateFromSerializedValue(binary.handle, mime_c.as_ptr(), &mut handle)
@@ -288,17 +313,21 @@ impl Value {
         dtype: i32,
         flags: i32,
     ) -> Result<Self> {
-        let shape_ptr = if shape.is_empty() { std::ptr::null() } else { shape.as_ptr() };
-        let mut handle = std::ptr::null_mut();
-        let status = unsafe {
-            super::FXNValueCreateArray(data, shape_ptr, dims, dtype, flags, &mut handle)
+        let shape_ptr = if shape.is_empty() {
+            std::ptr::null()
+        } else {
+            shape.as_ptr()
         };
+        let mut handle = std::ptr::null_mut();
+        let status =
+            unsafe { super::FXNValueCreateArray(data, shape_ptr, dims, dtype, flags, &mut handle) };
         check_status(status, "Failed to create array value")?;
         Ok(Self::from_raw(handle, true))
     }
 
     fn create_string(data: &str) -> Result<Self> {
-        let cstr = CString::new(data).map_err(|e| crate::client::MunaError::Native(e.to_string()))?;
+        let cstr =
+            CString::new(data).map_err(|e| crate::client::MunaError::Native(e.to_string()))?;
         let mut handle = std::ptr::null_mut();
         let status = unsafe { super::FXNValueCreateString(cstr.as_ptr(), &mut handle) };
         check_status(status, "Failed to create string value")?;
@@ -306,7 +335,8 @@ impl Value {
     }
 
     fn create_list(json: &str) -> Result<Self> {
-        let cstr = CString::new(json).map_err(|e| crate::client::MunaError::Native(e.to_string()))?;
+        let cstr =
+            CString::new(json).map_err(|e| crate::client::MunaError::Native(e.to_string()))?;
         let mut handle = std::ptr::null_mut();
         let status = unsafe { super::FXNValueCreateList(cstr.as_ptr(), &mut handle) };
         check_status(status, "Failed to create list value")?;
@@ -314,7 +344,8 @@ impl Value {
     }
 
     fn create_dict(json: &str) -> Result<Self> {
-        let cstr = CString::new(json).map_err(|e| crate::client::MunaError::Native(e.to_string()))?;
+        let cstr =
+            CString::new(json).map_err(|e| crate::client::MunaError::Native(e.to_string()))?;
         let mut handle = std::ptr::null_mut();
         let status = unsafe { super::FXNValueCreateDict(cstr.as_ptr(), &mut handle) };
         check_status(status, "Failed to create dict value")?;
@@ -338,7 +369,10 @@ impl Value {
     }
 
     fn create_image_list(images: &[types::Image]) -> Result<Self> {
-        let pixel_buffers: Vec<*const c_void> = images.iter().map(|img| img.data.as_ptr() as *const c_void).collect();
+        let pixel_buffers: Vec<*const c_void> = images
+            .iter()
+            .map(|img| img.data.as_ptr() as *const c_void)
+            .collect();
         let widths: Vec<i32> = images.iter().map(|img| img.width as i32).collect();
         let heights: Vec<i32> = images.iter().map(|img| img.height as i32).collect();
         let channels: Vec<i32> = images.iter().map(|img| img.channels as i32).collect();
@@ -359,11 +393,17 @@ impl Value {
     }
 
     fn create_array_list(tensors: &[types::Tensor]) -> Result<Self> {
-        let data_ptrs: Vec<*const c_void> = tensors.iter().map(|t| t.data.as_ptr() as *const c_void).collect();
+        let data_ptrs: Vec<*const c_void> = tensors
+            .iter()
+            .map(|t| t.data.as_ptr() as *const c_void)
+            .collect();
         let shapes: Vec<Vec<i32>> = tensors.iter().map(|t| t.shape.clone()).collect();
         let shape_ptrs: Vec<*const i32> = shapes.iter().map(|s| s.as_ptr()).collect();
         let dims: Vec<i32> = tensors.iter().map(|t| t.shape.len() as i32).collect();
-        let dtypes: Vec<i32> = tensors.iter().map(|t| super::dtype_to_c(t.data.dtype())).collect();
+        let dtypes: Vec<i32> = tensors
+            .iter()
+            .map(|t| super::dtype_to_c(t.data.dtype()))
+            .collect();
         let mut handle = std::ptr::null_mut();
         let status = unsafe {
             super::FXNValueCreateArrayList(
@@ -409,7 +449,10 @@ impl Value {
         if shape.is_empty() {
             return Ok(scalar_from_tensor_data(&wrap(data)));
         }
-        Ok(types::Value::Tensor(types::Tensor { data: wrap(data), shape }))
+        Ok(types::Value::Tensor(types::Tensor {
+            data: wrap(data),
+            shape,
+        }))
     }
 
     fn read_bool_tensor(&self, data_ptr: *mut c_void) -> Result<types::Value> {
@@ -444,9 +487,9 @@ fn scalar_from_tensor_data(data: &types::TensorData) -> types::Value {
     match data {
         types::TensorData::Float32(v) => types::Value::Float(v[0]),
         types::TensorData::Float64(v) => types::Value::Double(v[0]),
-        types::TensorData::Int32(v)   => types::Value::Int(v[0]),
-        types::TensorData::Int64(v)   => types::Value::Long(v[0]),
-        types::TensorData::Bool(v)    => types::Value::Bool(v[0]),
+        types::TensorData::Int32(v) => types::Value::Int(v[0]),
+        types::TensorData::Int64(v) => types::Value::Long(v[0]),
+        types::TensorData::Bool(v) => types::Value::Bool(v[0]),
         _ => types::Value::Tensor(types::Tensor {
             data: data.clone(),
             shape: vec![],

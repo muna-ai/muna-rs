@@ -3,23 +3,40 @@
 *   Copyright © 2026 NatML Inc. All Rights Reserved.
 */
 
-use std::collections::HashMap;
 use futures_util::StreamExt;
 use muna::{Muna, MunaError, Value};
+use std::collections::HashMap;
 
 #[tokio::test]
 async fn test_create_raw_prediction() {
     let _ = dotenvy::dotenv();
     let muna = Muna::default();
-    let prediction = muna.predictions.create(
-        "@fxn/greeting",
-        None,
-        None,
-        None,
-        None,
-    ).await.unwrap();
+    let prediction = muna
+        .predictions
+        .create("@fxn/greeting", None, None, None, None)
+        .await
+        .unwrap();
     assert!(prediction.configuration.is_some());
     assert!(prediction.resources.is_some());
+}
+
+#[tokio::test]
+async fn test_empty_inputs_download_and_cache_resources() {
+    let _ = dotenvy::dotenv();
+    let muna = Muna::default();
+    let prediction = muna
+        .predictions
+        .create(
+            "@fxn/greeting",
+            Some(HashMap::new()),
+            Some(muna::Acceleration::RemoteCpu),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(prediction.resources.is_some());
+    assert!(prediction.results.is_none());
 }
 
 #[tokio::test]
@@ -28,13 +45,11 @@ async fn test_create_prediction() {
     let muna = Muna::default();
     let mut inputs = HashMap::new();
     inputs.insert("radius".to_string(), 4.0f32.into());
-    let prediction = muna.predictions.create(
-        "@yusuf/area",
-        Some(inputs),
-        None,
-        None,
-        None,
-    ).await.unwrap();
+    let prediction = muna
+        .predictions
+        .create("@yusuf/area", Some(inputs), None, None, None)
+        .await
+        .unwrap();
     assert!(prediction.results.is_some());
     let results = prediction.results.unwrap();
     assert!(matches!(results[0], Value::Float(_) | Value::Double(_)));
@@ -46,11 +61,11 @@ async fn test_stream_prediction() {
     let muna = Muna::default();
     let mut inputs = HashMap::new();
     inputs.insert("sentence".to_string(), "The fat cat sat on the mat.".into());
-    let mut stream = muna.predictions.stream(
-        "@yusuf/generator",
-        inputs,
-        None,
-    ).await.unwrap();
+    let mut stream = muna
+        .predictions
+        .stream("@yusuf/generator", inputs, None)
+        .await
+        .unwrap();
     let mut count = 0;
     while let Some(prediction) = stream.next().await {
         let prediction = prediction.unwrap();
@@ -68,13 +83,11 @@ async fn test_create_remote_prediction() {
     let muna = Muna::default();
     let mut inputs = HashMap::new();
     inputs.insert("sentence".to_string(), "The fat cat sat on the mat.".into());
-    let prediction = muna.predictions.create(
-        "@yusuf/generator",
-        Some(inputs),
-        None,
-        None,
-        None
-    ).await.unwrap();
+    let prediction = muna
+        .predictions
+        .create("@yusuf/generator", Some(inputs), None, None, None)
+        .await
+        .unwrap();
     assert!(prediction.results.is_some());
     let results = prediction.results.unwrap();
     assert!(matches!(results[0], Value::String(_)));
@@ -86,11 +99,15 @@ async fn test_stream_remote_prediction() {
     let muna = Muna::default();
     let mut inputs = HashMap::new();
     inputs.insert("sentence".to_string(), "The fat cat sat on the mat.".into());
-    let mut stream = muna.predictions.stream(
-        "@yusuf/generator",
-        inputs,
-        Some(muna::Acceleration::RemoteCpu),
-    ).await.unwrap();
+    let mut stream = muna
+        .predictions
+        .stream(
+            "@yusuf/generator",
+            inputs,
+            Some(muna::Acceleration::RemoteCpu),
+        )
+        .await
+        .unwrap();
     let mut count = 0;
     while let Some(prediction) = stream.next().await {
         let prediction = prediction.unwrap();
@@ -106,13 +123,10 @@ async fn test_stream_remote_prediction() {
 async fn test_create_invalid_prediction() {
     let _ = dotenvy::dotenv();
     let muna = Muna::default();
-    let result = muna.predictions.create(
-        "@yusu/invalid-predictor",
-        None,
-        None,
-        None,
-        None,
-    ).await;
+    let result = muna
+        .predictions
+        .create("@yusu/invalid-predictor", None, None, None, None)
+        .await;
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(matches!(err, MunaError::Api { .. }));

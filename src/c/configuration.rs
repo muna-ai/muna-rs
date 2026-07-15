@@ -31,7 +31,11 @@ impl Configuration {
     pub fn tag(&self) -> Result<Option<String>> {
         let mut buffer = vec![0u8; 2048];
         let status = unsafe {
-            super::FXNConfigurationGetTag(self.handle, buffer.as_mut_ptr() as *mut _, buffer.len() as i32)
+            super::FXNConfigurationGetTag(
+                self.handle,
+                buffer.as_mut_ptr() as *mut _,
+                buffer.len() as i32,
+            )
         };
         check_status(status, "Failed to get configuration tag")?;
         let tag = unsafe { std::ffi::CStr::from_ptr(buffer.as_ptr() as *const _) }
@@ -51,7 +55,11 @@ impl Configuration {
     pub fn token(&self) -> Result<Option<String>> {
         let mut buffer = vec![0u8; 2048];
         let status = unsafe {
-            super::FXNConfigurationGetToken(self.handle, buffer.as_mut_ptr() as *mut _, buffer.len() as i32)
+            super::FXNConfigurationGetToken(
+                self.handle,
+                buffer.as_mut_ptr() as *mut _,
+                buffer.len() as i32,
+            )
         };
         check_status(status, "Failed to get configuration token")?;
         let token = unsafe { std::ffi::CStr::from_ptr(buffer.as_ptr() as *const _) }
@@ -62,7 +70,8 @@ impl Configuration {
 
     /// Set the configuration token.
     pub fn set_token(&mut self, token: &str) -> Result<()> {
-        let token = CString::new(token).map_err(|e| crate::client::MunaError::Native(e.to_string()))?;
+        let token =
+            CString::new(token).map_err(|e| crate::client::MunaError::Native(e.to_string()))?;
         let status = unsafe { super::FXNConfigurationSetToken(self.handle, token.as_ptr()) };
         check_status(status, "Failed to set configuration token")
     }
@@ -73,12 +82,93 @@ impl Configuration {
         check_status(status, "Failed to set configuration acceleration")
     }
 
+    /// Get the compute devices.
+    pub fn devices(&self) -> Result<Vec<*mut c_void>> {
+        let mut count = 0i32;
+        let status = unsafe {
+            super::FXNConfigurationGetDevices(self.handle, std::ptr::null_mut(), &mut count)
+        };
+        check_status(status, "Failed to get configuration device count")?;
+        let mut devices = vec![std::ptr::null_mut(); count as usize];
+        if count == 0 {
+            return Ok(devices);
+        }
+        let status = unsafe {
+            super::FXNConfigurationGetDevices(self.handle, devices.as_mut_ptr(), &mut count)
+        };
+        check_status(status, "Failed to get configuration devices")?;
+        devices.truncate(count as usize);
+        Ok(devices)
+    }
+
+    /// Set the compute devices.
+    pub fn set_devices(&mut self, devices: &[*const c_void]) -> Result<()> {
+        let count = i32::try_from(devices.len()).map_err(|_| {
+            crate::client::MunaError::Native(
+                "Cannot set more than i32::MAX configuration devices".to_string(),
+            )
+        })?;
+        let ptr = if devices.is_empty() {
+            std::ptr::null()
+        } else {
+            devices.as_ptr()
+        };
+        let status = unsafe { super::FXNConfigurationSetDevices(self.handle, ptr, count) };
+        check_status(status, "Failed to set configuration devices")
+    }
+
     /// Add a resource to the configuration.
     pub fn add_resource(&mut self, resource_type: &str, path: &str) -> Result<()> {
-        let rtype = CString::new(resource_type).map_err(|e| crate::client::MunaError::Native(e.to_string()))?;
-        let rpath = CString::new(path).map_err(|e| crate::client::MunaError::Native(e.to_string()))?;
-        let status = unsafe { super::FXNConfigurationAddResource(self.handle, rtype.as_ptr(), rpath.as_ptr()) };
+        let rtype = CString::new(resource_type)
+            .map_err(|e| crate::client::MunaError::Native(e.to_string()))?;
+        let rpath =
+            CString::new(path).map_err(|e| crate::client::MunaError::Native(e.to_string()))?;
+        let status = unsafe {
+            super::FXNConfigurationAddResource(self.handle, rtype.as_ptr(), rpath.as_ptr())
+        };
         check_status(status, "Failed to add configuration resource")
+    }
+
+    /// Get a metadata value.
+    pub fn metadata(&self, key: &str) -> Result<Option<String>> {
+        let key = CString::new(key).map_err(|e| crate::client::MunaError::Native(e.to_string()))?;
+        let mut buffer = vec![0u8; 2048];
+        let status = unsafe {
+            super::FXNConfigurationGetMetadata(
+                self.handle,
+                key.as_ptr(),
+                buffer.as_mut_ptr() as *mut _,
+                buffer.len() as i32,
+            )
+        };
+        if status == super::FXNStatus::ErrorInvalidArgument as i32 {
+            return Ok(None);
+        }
+        check_status(status, "Failed to get configuration metadata")?;
+        let value = unsafe { std::ffi::CStr::from_ptr(buffer.as_ptr() as *const _) }
+            .to_string_lossy()
+            .into_owned();
+        Ok(Some(value))
+    }
+
+    /// Set a metadata value.
+    pub fn set_metadata(&mut self, key: &str, value: &str) -> Result<()> {
+        let key = CString::new(key).map_err(|e| crate::client::MunaError::Native(e.to_string()))?;
+        let value =
+            CString::new(value).map_err(|e| crate::client::MunaError::Native(e.to_string()))?;
+        let status = unsafe {
+            super::FXNConfigurationSetMetadata(self.handle, key.as_ptr(), value.as_ptr())
+        };
+        check_status(status, "Failed to set configuration metadata")
+    }
+
+    /// Remove a metadata value.
+    pub fn remove_metadata(&mut self, key: &str) -> Result<()> {
+        let key = CString::new(key).map_err(|e| crate::client::MunaError::Native(e.to_string()))?;
+        let status = unsafe {
+            super::FXNConfigurationSetMetadata(self.handle, key.as_ptr(), std::ptr::null())
+        };
+        check_status(status, "Failed to remove configuration metadata")
     }
 
     /// Get the unique configuration identifier.
@@ -118,5 +208,47 @@ impl Drop for Configuration {
             unsafe { super::FXNConfigurationRelease(self.handle) };
             self.handle = std::ptr::null_mut();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Configuration;
+    use std::ffi::c_void;
+
+    #[test]
+    fn metadata_roundtrip_and_remove() {
+        let mut configuration = Configuration::new().unwrap();
+        assert_eq!(configuration.metadata("owner").unwrap(), None);
+
+        configuration.set_metadata("owner", "muna").unwrap();
+        assert_eq!(
+            configuration.metadata("owner").unwrap().as_deref(),
+            Some("muna")
+        );
+
+        configuration.remove_metadata("owner").unwrap();
+        assert_eq!(configuration.metadata("owner").unwrap(), None);
+    }
+
+    #[test]
+    fn devices_roundtrip_and_clear() {
+        let mut configuration = Configuration::new().unwrap();
+        assert!(configuration.devices().unwrap().is_empty());
+
+        let first = 0u8;
+        let second = 0u8;
+        let devices = [
+            std::ptr::from_ref(&first).cast::<c_void>(),
+            std::ptr::from_ref(&second).cast::<c_void>(),
+        ];
+        configuration.set_devices(&devices).unwrap();
+        assert_eq!(
+            configuration.devices().unwrap(),
+            devices.map(|device| device.cast_mut()).to_vec()
+        );
+
+        configuration.set_devices(&[]).unwrap();
+        assert!(configuration.devices().unwrap().is_empty());
     }
 }

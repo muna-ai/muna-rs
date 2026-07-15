@@ -28,7 +28,11 @@ impl Prediction {
     pub fn id(&self) -> Result<String> {
         let mut buffer = vec![0u8; 256];
         let status = unsafe {
-            super::FXNPredictionGetID(self.handle, buffer.as_mut_ptr() as *mut _, buffer.len() as i32)
+            super::FXNPredictionGetID(
+                self.handle,
+                buffer.as_mut_ptr() as *mut _,
+                buffer.len() as i32,
+            )
         };
         check_status(status, "Failed to get prediction ID")?;
         let id = unsafe { std::ffi::CStr::from_ptr(buffer.as_ptr() as *const _) }
@@ -57,7 +61,11 @@ impl Prediction {
     pub fn error(&self) -> Result<Option<String>> {
         let mut buffer = vec![0u8; 2048];
         let _status = unsafe {
-            super::FXNPredictionGetError(self.handle, buffer.as_mut_ptr() as *mut _, buffer.len() as i32)
+            super::FXNPredictionGetError(
+                self.handle,
+                buffer.as_mut_ptr() as *mut _,
+                buffer.len() as i32,
+            )
         };
         let error = unsafe { std::ffi::CStr::from_ptr(buffer.as_ptr() as *const _) }
             .to_string_lossy()
@@ -72,7 +80,11 @@ impl Prediction {
         check_status(status, "Failed to get prediction log length")?;
         let mut buffer = vec![0u8; (log_length + 1) as usize];
         let status = unsafe {
-            super::FXNPredictionGetLogs(self.handle, buffer.as_mut_ptr() as *mut _, buffer.len() as i32)
+            super::FXNPredictionGetLogs(
+                self.handle,
+                buffer.as_mut_ptr() as *mut _,
+                buffer.len() as i32,
+            )
         };
         check_status(status, "Failed to get prediction logs")?;
         let logs = unsafe { std::ffi::CStr::from_ptr(buffer.as_ptr() as *const _) }
@@ -83,6 +95,7 @@ impl Prediction {
 }
 
 impl Drop for Prediction {
+
     fn drop(&mut self) {
         if !self.handle.is_null() {
             unsafe { super::FXNPredictionRelease(self.handle) };

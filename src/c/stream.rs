@@ -57,6 +57,7 @@ impl Iterator for PredictionStream {
 }
 
 impl Drop for PredictionStream {
+
     fn drop(&mut self) {
         if !self.handle.is_null() {
             unsafe { super::FXNPredictionStreamRelease(self.handle) };

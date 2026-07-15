@@ -28,7 +28,10 @@ impl ValueMap {
         let mut handle = std::ptr::null_mut();
         let status = unsafe { super::FXNValueMapCreate(&mut handle) };
         check_status(status, "Failed to create value map")?;
-        Ok(Self { handle, owned: true })
+        Ok(Self {
+            handle,
+            owned: true,
+        })
     }
 
     pub(crate) fn from_raw(handle: *mut c_void, owned: bool) -> Self {
@@ -39,7 +42,11 @@ impl ValueMap {
     pub fn len(&self) -> usize {
         let mut count: i32 = 0;
         let status = unsafe { super::FXNValueMapGetSize(self.handle, &mut count) };
-        if status != 0 { 0 } else { count as usize }
+        if status != 0 {
+            0
+        } else {
+            count as usize
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -50,7 +57,12 @@ impl ValueMap {
     pub fn key(&self, index: usize) -> Result<String> {
         let mut buffer = vec![0u8; 256];
         let status = unsafe {
-            super::FXNValueMapGetKey(self.handle, index as i32, buffer.as_mut_ptr() as *mut _, buffer.len() as i32)
+            super::FXNValueMapGetKey(
+                self.handle,
+                index as i32,
+                buffer.as_mut_ptr() as *mut _,
+                buffer.len() as i32,
+            )
         };
         check_status(status, &format!("Failed to get key at index {index}"))?;
         let key = unsafe { std::ffi::CStr::from_ptr(buffer.as_ptr() as *const _) }
@@ -61,18 +73,19 @@ impl ValueMap {
 
     /// Get a value by key (non-owning).
     pub fn get(&self, key: &str) -> Result<Value> {
-        let key_c = CString::new(key)
-            .map_err(|e| crate::client::MunaError::Native(e.to_string()))?;
+        let key_c =
+            CString::new(key).map_err(|e| crate::client::MunaError::Native(e.to_string()))?;
         let mut handle = std::ptr::null_mut();
-        let status = unsafe { super::FXNValueMapGetValue(self.handle, key_c.as_ptr(), &mut handle) };
+        let status =
+            unsafe { super::FXNValueMapGetValue(self.handle, key_c.as_ptr(), &mut handle) };
         check_status(status, &format!("Failed to get value for key '{key}'"))?;
         Ok(Value::from_raw(handle, false))
     }
 
     /// Set a value by key.
     pub fn set(&mut self, key: &str, value: Value) -> Result<()> {
-        let key_c = CString::new(key)
-            .map_err(|e| crate::client::MunaError::Native(e.to_string()))?;
+        let key_c =
+            CString::new(key).map_err(|e| crate::client::MunaError::Native(e.to_string()))?;
         let status = unsafe {
             super::FXNValueMapSetValue(self.handle, key_c.as_ptr(), value.raw_handle())
         };

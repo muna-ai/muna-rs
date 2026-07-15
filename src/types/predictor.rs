@@ -3,9 +3,9 @@
 *   Copyright © 2026 NatML Inc. All Rights Reserved.
 */
 
-use std::fmt;
-use serde::{Deserialize, Serialize};
 use super::{Parameter, User};
+use serde::{Deserialize, Serialize};
+use std::fmt;
 
 /// Predictor access mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

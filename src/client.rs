@@ -234,9 +234,9 @@ impl MunaClient {
     /// destination directory and renamed into place only on success.
     pub async fn download(&self, url: &str, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-            tokio::fs::create_dir_all(parent).await.map_err(|e| {
-                MunaError::Prediction(format!("Failed to create directory: {e}"))
-            })?;
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| MunaError::Prediction(format!("Failed to create directory: {e}")))?;
         }
         let tmp_path = download_temp_path(path);
         let result = match self.probe_download(url).await {

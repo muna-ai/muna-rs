@@ -3,8 +3,8 @@
 *   Copyright © 2026 NatML Inc. All Rights Reserved.
 */
 
-use serde::{Deserialize, Serialize};
 use super::Dtype;
+use serde::{Deserialize, Serialize};
 
 /// Tensor data buffer.
 #[derive(Debug, Clone)]
@@ -28,19 +28,19 @@ impl TensorData {
 
     pub fn dtype(&self) -> Dtype {
         match self {
-            Self::Float32(_)    => Dtype::Float32,
-            Self::Float64(_)    => Dtype::Float64,
-            Self::Int8(_)       => Dtype::Int8,
-            Self::Int16(_)      => Dtype::Int16,
-            Self::Int32(_)      => Dtype::Int32,
-            Self::Int64(_)      => Dtype::Int64,
-            Self::Uint8(_)      => Dtype::Uint8,
-            Self::Uint16(_)     => Dtype::Uint16,
-            Self::Uint32(_)     => Dtype::Uint32,
-            Self::Uint64(_)     => Dtype::Uint64,
-            Self::Complex64(_)  => Dtype::Complex64,
+            Self::Float32(_) => Dtype::Float32,
+            Self::Float64(_) => Dtype::Float64,
+            Self::Int8(_) => Dtype::Int8,
+            Self::Int16(_) => Dtype::Int16,
+            Self::Int32(_) => Dtype::Int32,
+            Self::Int64(_) => Dtype::Int64,
+            Self::Uint8(_) => Dtype::Uint8,
+            Self::Uint16(_) => Dtype::Uint16,
+            Self::Uint32(_) => Dtype::Uint32,
+            Self::Uint64(_) => Dtype::Uint64,
+            Self::Complex64(_) => Dtype::Complex64,
             Self::Complex128(_) => Dtype::Complex128,
-            Self::Bool(_)       => Dtype::Bool,
+            Self::Bool(_) => Dtype::Bool,
         }
     }
 
@@ -48,17 +48,17 @@ impl TensorData {
         match self {
             Self::Float32(v) => v.len(),
             Self::Float64(v) => v.len(),
-            Self::Int8(v)    => v.len(),
-            Self::Int16(v)   => v.len(),
-            Self::Int32(v)   => v.len(),
-            Self::Int64(v)   => v.len(),
-            Self::Uint8(v)   => v.len(),
-            Self::Uint16(v)  => v.len(),
-            Self::Uint32(v)  => v.len(),
-            Self::Uint64(v)  => v.len(),
-            Self::Complex64(v)  => v.len(),
+            Self::Int8(v) => v.len(),
+            Self::Int16(v) => v.len(),
+            Self::Int32(v) => v.len(),
+            Self::Int64(v) => v.len(),
+            Self::Uint8(v) => v.len(),
+            Self::Uint16(v) => v.len(),
+            Self::Uint32(v) => v.len(),
+            Self::Uint64(v) => v.len(),
+            Self::Complex64(v) => v.len(),
             Self::Complex128(v) => v.len(),
-            Self::Bool(v)       => v.len(),
+            Self::Bool(v) => v.len(),
         }
     }
 
@@ -70,17 +70,17 @@ impl TensorData {
         match self {
             Self::Float32(v) => v.as_ptr() as *const u8,
             Self::Float64(v) => v.as_ptr() as *const u8,
-            Self::Int8(v)    => v.as_ptr() as *const u8,
-            Self::Int16(v)   => v.as_ptr() as *const u8,
-            Self::Int32(v)   => v.as_ptr() as *const u8,
-            Self::Int64(v)   => v.as_ptr() as *const u8,
-            Self::Uint8(v)   => v.as_ptr() as *const u8,
-            Self::Uint16(v)  => v.as_ptr() as *const u8,
-            Self::Uint32(v)  => v.as_ptr() as *const u8,
-            Self::Uint64(v)  => v.as_ptr() as *const u8,
-            Self::Complex64(v)  => v.as_ptr() as *const u8,
+            Self::Int8(v) => v.as_ptr() as *const u8,
+            Self::Int16(v) => v.as_ptr() as *const u8,
+            Self::Int32(v) => v.as_ptr() as *const u8,
+            Self::Int64(v) => v.as_ptr() as *const u8,
+            Self::Uint8(v) => v.as_ptr() as *const u8,
+            Self::Uint16(v) => v.as_ptr() as *const u8,
+            Self::Uint32(v) => v.as_ptr() as *const u8,
+            Self::Uint64(v) => v.as_ptr() as *const u8,
+            Self::Complex64(v) => v.as_ptr() as *const u8,
             Self::Complex128(v) => v.as_ptr() as *const u8,
-            Self::Bool(v)    => v.as_ptr() as *const u8,
+            Self::Bool(v) => v.as_ptr() as *const u8,
         }
     }
 }
@@ -136,23 +136,37 @@ pub struct RemoteValue {
 }
 
 impl From<f32> for Value {
-    fn from(v: f32) -> Self { Value::Float(v) }
+    fn from(v: f32) -> Self {
+        Value::Float(v)
+    }
 }
 impl From<f64> for Value {
-    fn from(v: f64) -> Self { Value::Double(v) }
+    fn from(v: f64) -> Self {
+        Value::Double(v)
+    }
 }
 impl From<i32> for Value {
-    fn from(v: i32) -> Self { Value::Int(v) }
+    fn from(v: i32) -> Self {
+        Value::Int(v)
+    }
 }
 impl From<i64> for Value {
-    fn from(v: i64) -> Self { Value::Long(v) }
+    fn from(v: i64) -> Self {
+        Value::Long(v)
+    }
 }
 impl From<bool> for Value {
-    fn from(v: bool) -> Self { Value::Bool(v) }
+    fn from(v: bool) -> Self {
+        Value::Bool(v)
+    }
 }
 impl From<String> for Value {
-    fn from(v: String) -> Self { Value::String(v) }
+    fn from(v: String) -> Self {
+        Value::String(v)
+    }
 }
 impl From<&str> for Value {
-    fn from(v: &str) -> Self { Value::String(v.to_string()) }
+    fn from(v: &str) -> Self {
+        Value::String(v.to_string())
+    }
 }

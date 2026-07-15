@@ -3,17 +3,17 @@
 *   Copyright © 2026 NatML Inc. All Rights Reserved.
 */
 
-use std::collections::HashMap;
-use std::sync::Arc;
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD as BASE64;
-use tokio::sync::RwLock;
-use crate::client::Result;
-use crate::MunaError;
-use crate::services::{PredictionService, PredictorService};
-use crate::types::{Acceleration, Dtype, Parameter, TensorData, Value};
 use super::schema::{Embedding, EmbeddingCreateResponse, EmbeddingData, EmbeddingUsage};
 use super::utils::get_parameter;
+use crate::client::Result;
+use crate::services::{PredictionService, PredictorService};
+use crate::types::{Acceleration, Dtype, Parameter, TensorData, Value};
+use crate::MunaError;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 /// Cached predictor metadata for fast embedding creation.
 struct DelegateInfo {
@@ -39,11 +39,7 @@ pub struct EmbeddingService {
 }
 
 impl EmbeddingService {
-
-    pub fn new(
-        predictors: PredictorService,
-        predictions: PredictionService
-    ) -> Self {
+    pub fn new(predictors: PredictorService, predictions: PredictionService) -> Self {
         Self {
             predictors,
             predictions,
@@ -74,14 +70,21 @@ impl EmbeddingService {
             let needs_create = !self.cache.read().await.contains_key(model);
             if needs_create {
                 let info = self.create_delegate_info(model).await?;
-                self.cache.write().await.entry(model.to_string()).or_insert(info);
+                self.cache
+                    .write()
+                    .await
+                    .entry(model.to_string())
+                    .or_insert(info);
             }
         }
         let cache = self.cache.read().await;
         let info = &cache[model];
         let mut input_map = HashMap::new();
         let input_value = Value::List(
-            input_texts.iter().map(|s| serde_json::Value::String(s.clone())).collect()
+            input_texts
+                .iter()
+                .map(|s| serde_json::Value::String(s.clone()))
+                .collect(),
         );
         input_map.insert(info.input_param_name.clone(), input_value);
         if let (Some(dims), Some(dim_name)) = (dimensions, &info.matryoshka_param_name) {
@@ -90,32 +93,33 @@ impl EmbeddingService {
         let embedding_param_idx = info.embedding_param_idx;
         let usage_param_idx = info.usage_param_idx;
         drop(cache);
-        let prediction = self.predictions.create(
-            model,
-            Some(input_map),
-            Some(acceleration),
-            None,
-            None
-        ).await?;
+        let prediction = self
+            .predictions
+            .create(model, Some(input_map), Some(acceleration), None, None)
+            .await?;
         if let Some(ref error) = prediction.error {
             return Err(MunaError::Prediction(error.clone()));
         }
-        let results = prediction.results.ok_or_else(|| {
-            MunaError::Prediction(format!("{model} returned no results"))
-        })?;
+        let results = prediction
+            .results
+            .ok_or_else(|| MunaError::Prediction(format!("{model} returned no results")))?;
         let embedding_value = results.get(embedding_param_idx).ok_or_else(|| {
             MunaError::Prediction(format!("{model} returned fewer results than expected"))
         })?;
         let (flat_data, shape) = match embedding_value {
             Value::Tensor(tensor) => match &tensor.data {
                 TensorData::Float32(data) => (data, &tensor.shape),
-                _ => return Err(MunaError::Prediction(format!(
-                    "{model} returned embedding matrix with invalid data type"
-                ))),
+                _ => {
+                    return Err(MunaError::Prediction(format!(
+                        "{model} returned embedding matrix with invalid data type"
+                    )))
+                }
             },
-            _ => return Err(MunaError::Prediction(format!(
-                "{model} returned non-tensor embedding value"
-            ))),
+            _ => {
+                return Err(MunaError::Prediction(format!(
+                    "{model} returned non-tensor embedding value"
+                )))
+            }
         };
         if shape.len() != 2 {
             return Err(MunaError::Prediction(format!(
@@ -135,13 +139,21 @@ impl EmbeddingService {
         let usage = match usage_param_idx {
             Some(idx) => match results.get(idx) {
                 Some(Value::Dict(map)) => {
-                    serde_json::from_value::<EmbeddingUsage>(
-                        serde_json::Value::Object(map.clone())
-                    ).unwrap_or(EmbeddingUsage { prompt_tokens: 0, total_tokens: 0 })
+                    serde_json::from_value::<EmbeddingUsage>(serde_json::Value::Object(map.clone()))
+                        .unwrap_or(EmbeddingUsage {
+                            prompt_tokens: 0,
+                            total_tokens: 0,
+                        })
                 }
-                _ => EmbeddingUsage { prompt_tokens: 0, total_tokens: 0 },
+                _ => EmbeddingUsage {
+                    prompt_tokens: 0,
+                    total_tokens: 0,
+                },
             },
-            None => EmbeddingUsage { prompt_tokens: 0, total_tokens: 0 },
+            None => EmbeddingUsage {
+                prompt_tokens: 0,
+                total_tokens: 0,
+            },
         };
         Ok(EmbeddingCreateResponse {
             object: "list".to_string(),
@@ -160,7 +172,9 @@ impl EmbeddingService {
             ))
         })?;
         let signature = &predictor.signature;
-        let required_inputs: Vec<&Parameter> = signature.inputs.iter()
+        let required_inputs: Vec<&Parameter> = signature
+            .inputs
+            .iter()
             .filter(|p| !p.optional.unwrap_or(false))
             .collect();
         if required_inputs.len() != 1 {
@@ -185,19 +199,22 @@ impl EmbeddingService {
             &signature.inputs,
             &int_dtypes,
             Some("openai.embeddings.dims"),
-        ).1.map(|p| p.name.clone());
-        let embedding_param_idx = get_parameter(
-            &signature.outputs,
-            &[Dtype::Float32],
-            Some("embedding"),
-        ).0.ok_or_else(|| {
-            MunaError::Prediction(format!(
-                "{tag} cannot be used with OpenAI embedding API because \
+        )
+        .1
+        .map(|p| p.name.clone());
+        let embedding_param_idx =
+            get_parameter(&signature.outputs, &[Dtype::Float32], Some("embedding"))
+                .0
+                .ok_or_else(|| {
+                    MunaError::Prediction(format!(
+                        "{tag} cannot be used with OpenAI embedding API because \
                 it has no outputs with an `embedding` denotation."
-            ))
-        })?;
+                    ))
+                })?;
         let usage_param_idx = signature.outputs.iter().position(|param| {
-            param.schema.as_ref()
+            param
+                .schema
+                .as_ref()
                 .and_then(|s| s.get("title"))
                 .and_then(|v| v.as_str())
                 == Some("Usage")
@@ -218,14 +235,10 @@ fn parse_embedding(
 ) -> Embedding {
     let data = match encoding_format {
         EncodingFormat::Base64 => {
-            let bytes: Vec<u8> = embedding_vec.iter()
-                .flat_map(|f| f.to_ne_bytes())
-                .collect();
+            let bytes: Vec<u8> = embedding_vec.iter().flat_map(|f| f.to_ne_bytes()).collect();
             EmbeddingData::Base64(BASE64.encode(&bytes))
         }
-        EncodingFormat::Float => {
-            EmbeddingData::Float(embedding_vec.to_vec())
-        }
+        EncodingFormat::Float => EmbeddingData::Float(embedding_vec.to_vec()),
     };
     Embedding {
         object: "embedding".to_string(),

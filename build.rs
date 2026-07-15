@@ -59,9 +59,7 @@ fn main() {
 
 fn cdn_downloads(os: &str, arch: &str) -> Vec<(&'static str, &'static str)> {
     match (os, arch) {
-        ("macos", "aarch64") => vec![
-            ("Function-macos-arm64.dylib", "libFunction.dylib"),
-        ],
+        ("macos", "aarch64") => vec![("Function-macos-arm64.dylib", "libFunction.dylib")],
         ("windows", "x86_64") => vec![
             ("Function-win-x86_64.dll", "Function.dll"),
             ("Function-win-x86_64.lib", "Function.lib"),
@@ -70,12 +68,8 @@ fn cdn_downloads(os: &str, arch: &str) -> Vec<(&'static str, &'static str)> {
             ("Function-win-arm64.dll", "Function.dll"),
             ("Function-win-arm64.lib", "Function.lib"),
         ],
-        ("linux", "x86_64") => vec![
-            ("libFunction-linux-x86_64.so", "libFunction.so"),
-        ],
-        ("linux", "aarch64") => vec![
-            ("libFunction-linux-arm64.so", "libFunction.so"),
-        ],
+        ("linux", "x86_64") => vec![("libFunction-linux-x86_64.so", "libFunction.so")],
+        ("linux", "aarch64") => vec![("libFunction-linux-arm64.so", "libFunction.so")],
         _ => panic!("Unsupported platform: {os}-{arch}"),
     }
 }
@@ -104,7 +98,9 @@ fn fxnc_version() -> String {
 
 fn download(url: &str, dest: &PathBuf) {
     eprintln!("Downloading {url}");
-    let response = ureq::get(url).call().expect(&format!("Failed to download {url}"));
+    let response = ureq::get(url)
+        .call()
+        .expect(&format!("Failed to download {url}"));
     let mut bytes = Vec::new();
     response
         .into_body()

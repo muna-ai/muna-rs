@@ -44,7 +44,7 @@ impl Muna {
             .or_else(|| std::env::var("MUNA_API_URL").ok());
         let client = Arc::new(MunaClient::new(
             access_key.as_deref(),
-            url.as_deref(),
+            url.as_deref()
         ));
         let users = services::UserService::new(client.clone());
         let predictors = services::PredictorService::new(client.clone());
@@ -52,7 +52,7 @@ impl Muna {
         let beta = beta::BetaClient::new(
             client.clone(),
             predictors.clone(),
-            predictions.clone(),
+            predictions.clone()
         );
         Self {
             client,
