@@ -1,5 +1,12 @@
 ## 0.0.14
-*INCOMPLETE*
++ Added `muna.beta.openai.images.generate` method for generating images with our OpenAI-compatible client.
++ Added `BatchMode` type for inspecting the batching mode of a batched parameter.
++ Added `BatchConfig.mode` field to inspect parameter batching mode.
++ Added `ChatCompletionUsage.prompt_tokens_details` field with prompt token breakdowns in the OpenAI-compatible client.
++ Renamed `BatchConfig.max_count` field to `BatchConfig.capacity`.
++ Removed `Predictor.card` field.
++ Removed `Predictor.media` field.
++ Removed `Predictor.license` field.
 
 ## 0.0.13
 + Upgraded to Function C 0.0.48.

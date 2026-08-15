@@ -63,10 +63,25 @@ pub struct EnumerationMember {
     pub value: EnumerationValue,
 }
 
+/// Batching mode for a batched parameter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BatchMode {
+    /// Fixed-size batches: buffer until capacity, then invoke.
+    Static,
+    /// Variable-size batches up to capacity.
+    Dynamic,
+    /// Predictor batches internally; callers submit concurrently.
+    Continuous,
+}
+
 /// Batch configuration for list parameters.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BatchConfig {
-    /// Maximum total item count across all merged requests.
-    pub max_count: usize,
+    /// Batching mode.
+    pub mode: BatchMode,
+    /// Batch capacity. Required for `static` and `dynamic` modes.
+    #[serde(default, alias = "max_count", alias = "maxCount", skip_serializing_if = "Option::is_none")]
+    pub capacity: Option<usize>,
 }

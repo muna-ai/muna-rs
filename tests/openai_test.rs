@@ -6,7 +6,7 @@
 use futures_util::StreamExt;
 use muna::beta::openai::{
     ChatCompletionCreateParams, ChatCompletionMessage,
-    EmbeddingData, EncodingFormat,
+    EmbeddingData, EncodingFormat, ImageCreateParams,
 };
 use muna::Muna;
 
@@ -105,6 +105,35 @@ async fn test_stream_chat_completion() {
         count += 1;
     }
     assert!(count > 0);
+}
+
+#[tokio::test]
+async fn test_generate_image() {
+    let _ = dotenvy::dotenv();
+    let muna = Muna::default();
+    let response = muna
+        .beta
+        .openai
+        .images
+        .generate(ImageCreateParams {
+            prompt: "a cat".to_string(),
+            model: "@yusuf/image-model".to_string(),
+            background: None,
+            n: None,
+            output_format: None,
+            output_compression: None,
+            size: None,
+            acceleration: None,
+        })
+        .await
+        .unwrap();
+    let data = response.data.expect("no image data returned");
+    assert!(!data.is_empty());
+    let b64 = data[0].b64_json.as_ref().expect("no b64_json in image data");
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(b64).unwrap();
+    assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n", "expected PNG magic");
+    std::fs::write("/tmp/muna_cat.png", &bytes).unwrap();
 }
 
 fn chat_params() -> ChatCompletionCreateParams {

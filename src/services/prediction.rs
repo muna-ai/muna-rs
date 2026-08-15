@@ -6,11 +6,16 @@
 use base64::engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD};
 use base64::Engine;
 use futures_core::Stream;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::sync::{Mutex, RwLock};
 
 use crate::c;
 use crate::client::{MunaClient, MunaError, RequestInput, Result, SseEvent};
@@ -23,16 +28,48 @@ use crate::types::{
 #[derive(Clone)]
 pub struct PredictionService {
     client: Arc<MunaClient>,
-    cache: Arc<tokio::sync::RwLock<HashMap<String, Arc<c::Predictor>>>>,
+    cache: Arc<RwLock<HashMap<PredictionCacheKey, LoadedPredictor>>>,
+    operation_locks: Arc<Mutex<HashMap<PredictionCacheKey, Arc<Mutex<()>>>>>,
     cache_dir: PathBuf,
 }
 
+#[derive(Clone)]
+struct LoadedPredictor {
+    predictor: Arc<c::Predictor>,
+    next_refresh: Arc<Mutex<Option<i64>>>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+struct PredictionCacheKey {
+    tag: String,
+    target: String,
+    configuration_id: Option<String>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct DiskCachedPrediction {
+    version: u8,
+    key: PredictionCacheKey,
+    cached_at: i64,
+    prediction: Prediction,
+}
+
+struct PredictionResolution {
+    prediction: Prediction,
+    next_refresh: Option<i64>,
+}
+
+static CACHE_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
 impl PredictionService {
+    const CACHE_VERSION: u8 = 1;
+    const REFRESH_RETRY_SECONDS: i64 = 60 * 60;
 
     pub fn new(client: Arc<MunaClient>) -> Self {
         Self {
             client,
-            cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            cache: Arc::new(RwLock::new(HashMap::new())),
+            operation_locks: Arc::new(Mutex::new(HashMap::new())),
             cache_dir: get_cache_dir(),
         }
     }
@@ -47,7 +84,9 @@ impl PredictionService {
         configuration_id: Option<String>,
     ) -> Result<Prediction> {
         let is_download_only = inputs.as_ref().is_some_and(HashMap::is_empty);
-        let is_local = inputs.is_none() || is_download_only || is_local_acceleration(acceleration.as_ref());
+        let is_local = inputs.is_none() ||
+            is_download_only ||
+            is_local_acceleration(acceleration.as_ref());
         if is_local {
             self.create_local(tag, inputs, acceleration, client_id, configuration_id)
                 .await
@@ -65,7 +104,7 @@ impl PredictionService {
         acceleration: Option<Acceleration>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<Prediction>> + Send>>> {
         if is_local_acceleration(acceleration.as_ref()) {
-            self.stream_local(tag, inputs, acceleration).await
+            self.stream_local(tag, inputs, acceleration, None, None).await
         } else {
             self.stream_remote(tag, &inputs, acceleration).await
         }
@@ -74,7 +113,9 @@ impl PredictionService {
     /// Delete a predictor that is loaded in memory.
     pub async fn delete(&self, tag: &str) -> Result<bool> {
         let mut cache = self.cache.write().await;
-        Ok(cache.remove(tag).is_some())
+        let previous_len = cache.len();
+        cache.retain(|key, _| key.tag != tag);
+        Ok(cache.len() != previous_len)
     }
 
     async fn create_local(
@@ -100,12 +141,9 @@ impl PredictionService {
                     .await
             }
         };
-        self.load_predictor(tag, &acceleration, client_id, configuration_id)
+        let predictor = self
+            .load_predictor(tag, &acceleration, client_id, configuration_id)
             .await?;
-        let predictor = {
-            let cache = self.cache.read().await;
-            cache[tag].clone()
-        };
         let input_map = c::ValueMap::from_dict(&inputs)?;
         let prediction = predictor.create_prediction(&input_map)?;
         Ok(to_prediction(tag, &prediction))
@@ -116,13 +154,13 @@ impl PredictionService {
         tag: &str,
         inputs: HashMap<String, Value>,
         acceleration: Option<Acceleration>,
+        client_id: Option<String>,
+        configuration_id: Option<String>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<Prediction>> + Send>>> {
-        self.load_predictor(tag, &acceleration, None, None).await?;
+        let predictor = self
+            .load_predictor(tag, &acceleration, client_id, configuration_id)
+            .await?;
         let tag = tag.to_string();
-        let predictor = {
-            let cache = self.cache.read().await;
-            cache[tag.as_str()].clone()
-        };
         let input_map = c::ValueMap::from_dict(&inputs)?;
         let stream_handle = c::PredictionStream::create(predictor.raw_ptr(), &input_map)?;
         let stream = async_stream::try_stream! {
@@ -193,16 +231,24 @@ impl PredictionService {
         client_id: Option<String>,
         configuration_id: Option<String>,
     ) -> Result<Prediction> {
-        let client_id = client_id
-            .or_else(|| c::Configuration::get_client_id().ok())
-            .unwrap_or_else(|| "rust".to_string());
-        let configuration_id = configuration_id.or_else(|| c::Configuration::get_unique_id().ok());
+        let key = prediction_cache_key(tag, client_id, configuration_id);
+        self.request_raw_prediction(&key, None).await
+    }
+
+    async fn request_raw_prediction(
+        &self,
+        key: &PredictionCacheKey,
+        prediction_id: Option<&str>,
+    ) -> Result<Prediction> {
         let mut body = serde_json::json!({
-            "tag": tag,
-            "clientId": client_id,
+            "tag": key.tag,
+            "clientId": key.target,
         });
-        if let Some(config_id) = configuration_id {
-            body["configurationId"] = serde_json::Value::String(config_id);
+        if let Some(configuration_id) = &key.configuration_id {
+            body["configurationId"] = serde_json::Value::String(configuration_id.clone());
+        }
+        if let Some(prediction_id) = prediction_id {
+            body["predictionId"] = serde_json::Value::String(prediction_id.to_string());
         }
         self.client
             .request(RequestInput::post("/predictions").body(body))
@@ -215,18 +261,56 @@ impl PredictionService {
         acceleration: &Option<Acceleration>,
         client_id: Option<String>,
         configuration_id: Option<String>,
-    ) -> Result<()> {
-        {
-            let cache = self.cache.read().await;
-            if cache.contains_key(tag) {
-                return Ok(());
-            }
+    ) -> Result<Arc<c::Predictor>> {
+        let key = prediction_cache_key(tag, client_id, configuration_id);
+        if let Some(loaded) = self.cache.read().await.get(&key).cloned() {
+            self.refresh_loaded_prediction(&key, &loaded).await;
+            return Ok(loaded.predictor);
         }
+        let operation_lock = self.operation_lock(&key).await;
+        let _guard = operation_lock.lock().await;
+        if let Some(loaded) = self.cache.read().await.get(&key).cloned() {
+            return Ok(loaded.predictor);
+        }
+
         let acceleration = acceleration.clone().unwrap_or(Acceleration::LocalAuto);
-        let prediction = self
-            .create_raw_prediction(tag, client_id, configuration_id)
-            .await?;
-        let prediction = self.create_cached_prediction(&prediction).await?;
+        let mut resolution = self.get_or_refresh_prediction(&key, false).await?;
+        let configuration = self.create_native_configuration(
+            tag,
+            &acceleration,
+            &resolution.prediction
+        ).await?;
+        let predictor = match c::Predictor::new(&configuration) {
+            Ok(predictor) => predictor,
+            Err(_) => {
+                // The native API does not expose enough detail to distinguish a
+                // bad cached token/resource from other creation failures. Clear
+                // the complete cache entry and perform one unpinned refetch.
+                self.invalidate_prediction_cache(&key).await;
+                resolution = self.get_or_refresh_prediction(&key, true).await?;
+                let configuration = self.create_native_configuration(
+                    tag,
+                    &acceleration,
+                    &resolution.prediction
+                ).await?;
+                c::Predictor::new(&configuration)?
+            }
+        };
+        let predictor = Arc::new(predictor);
+        let loaded = LoadedPredictor {
+            predictor: predictor.clone(),
+            next_refresh: Arc::new(Mutex::new(resolution.next_refresh)),
+        };
+        self.cache.write().await.insert(key, loaded);
+        Ok(predictor)
+    }
+
+    async fn create_native_configuration(
+        &self,
+        tag: &str,
+        acceleration: &Acceleration,
+        prediction: &Prediction,
+    ) -> Result<c::Configuration> {
         let config_token = prediction.configuration.clone().ok_or_else(|| {
             MunaError::Prediction(format!(
                 "Failed to create {tag} prediction because configuration token is missing"
@@ -235,7 +319,7 @@ impl PredictionService {
         let mut configuration = c::Configuration::new()?;
         configuration.set_tag(tag)?;
         configuration.set_token(&config_token)?;
-        configuration.set_acceleration(c::acceleration_to_c(&acceleration))?;
+        configuration.set_acceleration(c::acceleration_to_c(acceleration))?;
         if let Some(resources) = &prediction.resources {
             for resource in resources {
                 configuration.add_resource(&resource.kind, &resource.url)?;
@@ -256,10 +340,190 @@ impl PredictionService {
             let value = preload_output(&prediction, &entry.tag)?;
             configuration.set_metadata(&entry.metadata, value)?;
         }
-        let predictor = c::Predictor::new(&configuration)?;
-        let mut cache = self.cache.write().await;
-        cache.entry(tag.to_string()).or_insert(Arc::new(predictor));
+        Ok(configuration)
+    }
+
+    async fn get_or_refresh_prediction(
+        &self,
+        key: &PredictionCacheKey,
+        force_refresh: bool,
+    ) -> Result<PredictionResolution> {
+        let cached = self.read_prediction_cache(key).await;
+        if !force_refresh {
+            if let Some(cached) = cached.as_ref() {
+                let next_refresh = token_refresh_at(&cached.prediction, cached.cached_at);
+                if next_refresh.is_none_or(|refresh_at| unix_now() < refresh_at) {
+                    return Ok(PredictionResolution {
+                        prediction: cached.prediction.clone(),
+                        next_refresh,
+                    });
+                }
+                match self
+                    .fetch_and_cache_prediction(key, Some(&cached.prediction.id))
+                    .await
+                {
+                    Ok(fresh) => return Ok(fresh),
+                    Err(_) => {
+                        return Ok(PredictionResolution {
+                            prediction: cached.prediction.clone(),
+                            next_refresh: Some(unix_now() + Self::REFRESH_RETRY_SECONDS),
+                        });
+                    }
+                }
+            }
+        }
+        self.fetch_and_cache_prediction(key, None).await
+    }
+
+    async fn fetch_and_cache_prediction(
+        &self,
+        key: &PredictionCacheKey,
+        prediction_id: Option<&str>,
+    ) -> Result<PredictionResolution> {
+        let prediction = self.request_raw_prediction(key, prediction_id).await?;
+        let prediction = self.create_cached_prediction(&prediction).await?;
+        let cached_at = unix_now();
+        let next_refresh = token_refresh_at(&prediction, cached_at);
+        let cached = DiskCachedPrediction {
+            version: Self::CACHE_VERSION,
+            key: key.clone(),
+            cached_at,
+            prediction: prediction.clone(),
+        };
+        // A cache permission or disk-space problem must not prevent an online
+        // prediction from loading successfully.
+        let _ = self.write_prediction_cache(key, &cached).await;
+        Ok(PredictionResolution {
+            prediction,
+            next_refresh,
+        })
+    }
+
+    async fn refresh_loaded_prediction(&self, key: &PredictionCacheKey, loaded: &LoadedPredictor) {
+        let now = unix_now();
+        if loaded
+            .next_refresh
+            .lock()
+            .await
+            .is_none_or(|refresh_at| now < refresh_at)
+        {
+            return;
+        }
+        let operation_lock = self.operation_lock(key).await;
+        let _guard = operation_lock.lock().await;
+        let mut next_refresh = loaded.next_refresh.lock().await;
+        if next_refresh.is_none_or(|refresh_at| unix_now() < refresh_at) {
+            return;
+        }
+        let cached = self.read_prediction_cache(key).await;
+        let prediction_id = cached.as_ref().map(|cached| cached.prediction.id.as_str());
+        *next_refresh = match self.fetch_and_cache_prediction(key, prediction_id).await {
+            Ok(fresh) => fresh.next_refresh,
+            Err(_) => Some(unix_now() + Self::REFRESH_RETRY_SECONDS),
+        };
+    }
+
+    async fn operation_lock(&self, key: &PredictionCacheKey) -> Arc<Mutex<()>> {
+        let mut locks = self.operation_locks.lock().await;
+        locks
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
+    fn prediction_cache_path(&self, key: &PredictionCacheKey) -> PathBuf {
+        self.cache_dir
+            .join("predictions")
+            .join(format!("{:016x}.json", prediction_cache_hash(key)))
+    }
+
+    async fn read_prediction_cache(
+        &self,
+        key: &PredictionCacheKey,
+    ) -> Option<DiskCachedPrediction> {
+        let data = tokio::fs::read(self.prediction_cache_path(key))
+            .await
+            .ok()?;
+        let cached: DiskCachedPrediction = serde_json::from_slice(&data).ok()?;
+        (cached.version == Self::CACHE_VERSION && cached.key == *key).then_some(cached)
+    }
+
+    async fn write_prediction_cache(
+        &self,
+        key: &PredictionCacheKey,
+        cached: &DiskCachedPrediction,
+    ) -> Result<()> {
+        let path = self.prediction_cache_path(key);
+        let parent = path.parent().ok_or_else(|| {
+            MunaError::Prediction("Prediction cache path has no parent".to_string())
+        })?;
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| MunaError::Prediction(format!("Failed to create cache: {e}")))?;
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let sequence = CACHE_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("prediction.json");
+        let temporary = parent.join(format!(
+            ".{file_name}.{}.{}.{}.tmp",
+            std::process::id(),
+            nonce,
+            sequence
+        ));
+        let data = serde_json::to_vec(cached)?;
+        if let Err(error) = tokio::fs::write(&temporary, data).await {
+            return Err(MunaError::Prediction(format!(
+                "Failed to write prediction cache: {error}"
+            )));
+        }
+        if let Err(first_error) = tokio::fs::rename(&temporary, &path).await {
+            // Windows does not replace an existing destination with rename.
+            // Move the old complete entry aside, install the new complete
+            // entry, then remove the backup. Cross-process races can choose
+            // either valid writer, but never expose partial JSON.
+            let backup = parent.join(format!(
+                ".{file_name}.{}.{}.{}.backup",
+                std::process::id(),
+                nonce,
+                sequence
+            ));
+            let replace_result = if tokio::fs::metadata(&path).await.is_ok()
+                && tokio::fs::rename(&path, &backup).await.is_ok()
+            {
+                match tokio::fs::rename(&temporary, &path).await {
+                    Ok(()) => {
+                        let _ = tokio::fs::remove_file(&backup).await;
+                        Ok(())
+                    }
+                    Err(error) => {
+                        if tokio::fs::metadata(&path).await.is_err() {
+                            let _ = tokio::fs::rename(&backup, &path).await;
+                        } else {
+                            let _ = tokio::fs::remove_file(&backup).await;
+                        }
+                        Err(error)
+                    }
+                }
+            } else {
+                Err(first_error)
+            };
+            if let Err(error) = replace_result {
+                let _ = tokio::fs::remove_file(&temporary).await;
+                return Err(MunaError::Prediction(format!(
+                    "Failed to commit prediction cache: {error}"
+                )));
+            }
+        }
         Ok(())
+    }
+
+    async fn invalidate_prediction_cache(&self, key: &PredictionCacheKey) {
+        let _ = tokio::fs::remove_file(self.prediction_cache_path(key)).await;
     }
 
     fn get_resource_path(&self, resource: &PredictionResource) -> PathBuf {
@@ -309,16 +573,52 @@ impl PredictionService {
     }
 }
 
+fn prediction_cache_key(
+    tag: &str,
+    client_id: Option<String>,
+    configuration_id: Option<String>,
+) -> PredictionCacheKey {
+    let target = client_id
+        .or_else(|| c::Configuration::get_client_id().ok())
+        .unwrap_or_else(|| "rust".to_string());
+    let configuration_id = configuration_id.or_else(|| c::Configuration::get_unique_id().ok());
+    PredictionCacheKey {
+        tag: tag.to_string(),
+        target,
+        configuration_id,
+    }
+}
+
+fn parse_configuration_claims<T: serde::de::DeserializeOwned>(config_token: &str) -> Option<T> {
+    let payload = config_token.split('.').nth(1)?;
+    let payload = URL_SAFE_NO_PAD.decode(payload).ok()?;
+    serde_json::from_slice(&payload).ok()
+}
+
 fn parse_preload_claim(config_token: &str) -> Vec<PreloadEntry> {
-    let Some(payload) = config_token.split('.').nth(1) else {
-        return Vec::new();
-    };
-    let Ok(payload) = URL_SAFE_NO_PAD.decode(payload) else {
-        return Vec::new();
-    };
-    serde_json::from_slice::<ConfigurationClaims>(&payload)
+    parse_configuration_claims::<ConfigurationClaims>(config_token)
         .map(|claims| claims.preload)
         .unwrap_or_default()
+}
+
+fn token_refresh_at(
+    prediction: &Prediction,
+    cached_at: i64,
+) -> Option<i64> {
+    let claims = parse_configuration_claims::<TokenTimingClaims>(prediction.configuration.as_deref()?)?;
+    let exp = claims.exp?;
+    let issued_at = claims.iat.unwrap_or(cached_at);
+    let lifetime = exp.saturating_sub(issued_at);
+    if lifetime <= 0 {
+        return Some(exp);
+    }
+    Some(issued_at.saturating_add(lifetime / 2))
+}
+
+fn prediction_cache_hash(key: &PredictionCacheKey) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    key.hash(&mut hasher);
+    hasher.finish()
 }
 
 fn is_local_acceleration(acceleration: Option<&Acceleration>) -> bool {
@@ -406,11 +706,16 @@ fn get_muna_home() -> PathBuf {
 }
 
 fn chrono_now() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    unix_now().to_string()
+}
+
+fn unix_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs();
-    format!("{secs}")
+        .as_secs()
+        .try_into()
+        .unwrap_or(i64::MAX)
 }
 
 fn serialize_inputs(inputs: &HashMap<String, Value>) -> Result<serde_json::Value> {
@@ -649,18 +954,76 @@ struct ConfigurationClaims {
     preload: Vec<PreloadEntry>,
 }
 
+#[derive(Deserialize)]
+struct TokenTimingClaims {
+    #[serde(default)]
+    exp: Option<i64>,
+    #[serde(default)]
+    iat: Option<i64>,
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{parse_preload_claim, preload_output, PreloadEntry};
+    use super::{
+        parse_preload_claim, preload_output, token_refresh_at, unix_now, DiskCachedPrediction,
+        PredictionCacheKey, PredictionService, PreloadEntry,
+    };
+    use crate::client::MunaClient;
     use crate::types::{Acceleration, Prediction, Value};
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use base64::Engine;
+    use std::path::PathBuf;
+    use std::sync::Arc;
 
     fn token(payload: serde_json::Value) -> String {
         format!(
             "header.{}.signature",
             URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap())
         )
+    }
+
+    fn cache_key(target: &str, configuration_id: &str) -> PredictionCacheKey {
+        PredictionCacheKey {
+            tag: "@user/model".to_string(),
+            target: target.to_string(),
+            configuration_id: Some(configuration_id.to_string()),
+        }
+    }
+
+    fn prediction(id: &str, configuration: String) -> Prediction {
+        Prediction {
+            id: id.to_string(),
+            tag: "@user/model".to_string(),
+            created: "0".to_string(),
+            configuration: Some(configuration),
+            resources: None,
+            results: None,
+            latency: None,
+            error: None,
+            logs: None,
+        }
+    }
+
+    fn temp_cache_dir() -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "muna-prediction-cache-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn offline_service(cache_dir: PathBuf) -> PredictionService {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let mut service = PredictionService::new(Arc::new(MunaClient::new(None, Some(&url))));
+        service.cache_dir = cache_dir;
+        service
     }
 
     #[test]
@@ -731,6 +1094,107 @@ mod tests {
             "preload": [{"tag": "@user/model:decode"}]
         })))
         .is_empty());
+    }
+
+    #[test]
+    fn parses_exp_and_refreshes_at_half_life() {
+        let expiring_prediction = prediction(
+            "pred",
+            token(serde_json::json!({ "iat": 1_000, "exp": 2_000 })),
+        );
+        assert_eq!(token_refresh_at(&expiring_prediction, 1_000), Some(1_500));
+
+        let no_exp = prediction("legacy", token(serde_json::json!({ "iat": 1_000 })));
+        assert_eq!(token_refresh_at(&no_exp, 1_000), None);
+
+        let malformed_preload = prediction(
+            "malformed-preload",
+            token(serde_json::json!({
+                "iat": 1_000,
+                "exp": 2_000,
+                "preload": [{"unexpected": true}]
+            })),
+        );
+        assert_eq!(token_refresh_at(&malformed_preload, 1_000), Some(1_500));
+    }
+
+    #[test]
+    fn cache_key_includes_target_and_configuration_identity() {
+        assert_ne!(
+            cache_key("linux-x86_64", "device-a"),
+            cache_key("linux-aarch64", "device-a")
+        );
+        assert_ne!(
+            cache_key("linux-x86_64", "device-a"),
+            cache_key("linux-x86_64", "device-b")
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_refresh_failure_uses_persistent_cached_token() {
+        let cache_dir = temp_cache_dir();
+        let service = offline_service(cache_dir.clone());
+        let key = cache_key("linux-x86_64", "device-a");
+        let cached = DiskCachedPrediction {
+            version: PredictionService::CACHE_VERSION,
+            key: key.clone(),
+            cached_at: 1,
+            prediction: prediction(
+                "cached-prediction",
+                token(serde_json::json!({ "iat": 0, "exp": 1 })),
+            ),
+        };
+        service.write_prediction_cache(&key, &cached).await.unwrap();
+
+        let resolved = service
+            .get_or_refresh_prediction(&key, false)
+            .await
+            .unwrap();
+        assert_eq!(resolved.prediction.id, "cached-prediction");
+        assert!(resolved.next_refresh.unwrap() > unix_now());
+        let _ = std::fs::remove_dir_all(cache_dir);
+    }
+
+    #[tokio::test]
+    async fn first_load_without_cache_must_contact_api() {
+        let cache_dir = temp_cache_dir();
+        let service = offline_service(cache_dir.clone());
+        let key = cache_key("linux-x86_64", "device-a");
+
+        assert!(service
+            .get_or_refresh_prediction(&key, false)
+            .await
+            .is_err());
+        let _ = std::fs::remove_dir_all(cache_dir);
+    }
+
+    #[tokio::test]
+    async fn concurrent_cache_writes_leave_complete_entry() {
+        let cache_dir = temp_cache_dir();
+        let service = offline_service(cache_dir.clone());
+        let key = cache_key("linux-x86_64", "device-a");
+        let first = DiskCachedPrediction {
+            version: PredictionService::CACHE_VERSION,
+            key: key.clone(),
+            cached_at: 1,
+            prediction: prediction("first", token(serde_json::json!({ "exp": 10 }))),
+        };
+        let second = DiskCachedPrediction {
+            version: PredictionService::CACHE_VERSION,
+            key: key.clone(),
+            cached_at: 2,
+            prediction: prediction("second", token(serde_json::json!({ "exp": 20 }))),
+        };
+
+        let (a, b) = tokio::join!(
+            service.write_prediction_cache(&key, &first),
+            service.write_prediction_cache(&key, &second)
+        );
+        a.unwrap();
+        b.unwrap();
+        let cached = service.read_prediction_cache(&key).await.unwrap();
+        assert!(matches!(cached.prediction.id.as_str(), "first" | "second"));
+        let _ = std::fs::remove_dir_all(cache_dir);
     }
 
     #[test]

@@ -6,12 +6,14 @@
 mod chat;
 mod completions;
 mod embeddings;
+mod images;
 mod schema;
 mod utils;
 
 pub use chat::*;
 pub use completions::*;
 pub use embeddings::*;
+pub use images::*;
 pub use schema::*;
 
 use crate::services::{PredictionService, PredictorService};
@@ -23,6 +25,8 @@ pub struct OpenAIClient {
     pub chat: ChatService,
     /// Embeddings service.
     pub embeddings: EmbeddingService,
+    /// Image generation service.
+    pub images: ImageService,
 }
 
 impl OpenAIClient {
@@ -32,7 +36,8 @@ impl OpenAIClient {
         predictions: PredictionService
     ) -> Self {
         let chat = ChatService::new(predictors.clone(), predictions.clone());
-        let embeddings = EmbeddingService::new(predictors, predictions);
-        Self { chat, embeddings }
+        let embeddings = EmbeddingService::new(predictors.clone(), predictions.clone());
+        let images = ImageService::new(predictors, predictions);
+        Self { chat, embeddings, images }
     }
 }

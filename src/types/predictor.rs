@@ -45,15 +45,6 @@ pub struct Predictor {
     /// Predictor description.
     #[serde(default)]
     pub description: Option<String>,
-    /// Predictor card.
-    #[serde(default)]
-    pub card: Option<String>,
-    /// Predictor media URL.
-    #[serde(default)]
-    pub media: Option<String>,
-    /// Predictor license URL.
-    #[serde(default)]
-    pub license: Option<String>,
 }
 
 /// Prediction signature.

@@ -51,6 +51,18 @@ pub struct SseEvent<T> {
     pub data: T,
 }
 
+#[derive(Debug, Deserialize)]
+struct CreateResourceResponse {
+    url: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateResourceMultipartResponse {
+    #[serde(rename = "uploadId")]
+    upload_id: String,
+    urls: Vec<String>,
+}
+
 /// HTTP request input.
 pub struct RequestInput {
     pub path: String,
@@ -110,8 +122,14 @@ pub struct MunaClient {
 
 impl MunaClient {
     const DEFAULT_URL: &'static str = "https://api.muna.ai/v1";
+    const RESOURCE_URL_BASE: &'static str = "https://cdn.fxn.ai/resources";
     const DOWNLOAD_CHUNK_SIZE: u64 = 50 * 1024 * 1024; // 50 MB per range request
     const DOWNLOAD_MAX_FILES: usize = 16; // maximum parallel connections
+    const MULTIPART_THRESHOLD: u64 = 100 * 1024 * 1024; // 100 MB
+    const MULTIPART_CHUNK_SIZE: u64 = 50 * 1024 * 1024; // 50 MB per part
+    const UPLOAD_MAX_PARALLEL: usize = 8; // maximum parallel part uploads
+    const UPLOAD_MAX_RETRIES: u32 = 5;
+    const RETRYABLE_STATUS_CODES: [u16; 7] = [400, 408, 429, 500, 502, 503, 504];
 
     /// Create a Muna API client.
     pub fn new(access_key: Option<&str>, url: Option<&str>) -> Self {
@@ -332,6 +350,162 @@ impl MunaClient {
         result
     }
 
+    /// Upload a resource and return the resource URL.
+    ///
+    /// Resources already known to the API (matched by SHA-256) are not
+    /// re-uploaded. Files at or above the multipart threshold are uploaded
+    /// as multiple parts over parallel connections to saturate available
+    /// bandwidth; smaller files go up in a single `PUT`.
+    pub async fn upload(&self, path: &Path) -> Result<String> {
+        let metadata = tokio::fs::metadata(path)
+            .await
+            .map_err(|e| MunaError::Native(format!("Failed to stat resource: {e}")))?;
+        if !metadata.is_file() {
+            return Err(MunaError::Native(format!(
+                "Cannot upload resource at path {} because it is not a file",
+                path.display()
+            )));
+        }
+        let file_size = metadata.len();
+        let resource_hash = sha256_file(path).await?;
+        if self.resource_exists(&resource_hash).await? {
+            return Ok(format!("{}/{resource_hash}", Self::RESOURCE_URL_BASE));
+        }
+        if file_size >= Self::MULTIPART_THRESHOLD {
+            self.upload_resource_multipart(path, file_size, &resource_hash)
+                .await?;
+        } else {
+            self.upload_resource_single(path, &resource_hash).await?;
+        }
+        Ok(format!("{}/{resource_hash}", Self::RESOURCE_URL_BASE))
+    }
+
+    /// Check whether a resource with the given hash already exists.
+    async fn resource_exists(&self, resource_hash: &str) -> Result<bool> {
+        let url = format!("{}/resources/{resource_hash}", self.url);
+        let response = self
+            .http
+            .head(&url)
+            .header("Authorization", &self.auth)
+            .send()
+            .await?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(true);
+        }
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(false);
+        }
+        Err(MunaError::Api {
+            message: format!("Failed to check resource: {status}"),
+            status: status.as_u16(),
+        })
+    }
+
+    /// Upload a resource using a single `PUT`.
+    async fn upload_resource_single(&self, path: &Path, resource_hash: &str) -> Result<()> {
+        let resource: CreateResourceResponse = self
+            .request(RequestInput::post(format!("/resources/{resource_hash}")))
+            .await?;
+        let data = tokio::fs::read(path)
+            .await
+            .map_err(|e| MunaError::Native(format!("Failed to read resource: {e}")))?;
+        upload_part(&self.http, &resource.url, data, Self::UPLOAD_MAX_RETRIES).await?;
+        Ok(())
+    }
+
+    /// Upload a resource using multipart upload. Parts are uploaded over
+    /// parallel connections; part order is preserved for the completion call.
+    async fn upload_resource_multipart(
+        &self,
+        path: &Path,
+        file_size: u64,
+        resource_hash: &str,
+    ) -> Result<()> {
+        let num_parts = file_size.div_ceil(Self::MULTIPART_CHUNK_SIZE);
+        let resource: CreateResourceMultipartResponse = self
+            .request(
+                RequestInput::post(format!("/resources/{resource_hash}/multipart"))
+                    .body(serde_json::json!({ "parts": num_parts })),
+            )
+            .await?;
+        match self.upload_parts(path, &resource.urls).await {
+            Ok(etags) => {
+                let parts: Vec<serde_json::Value> = etags
+                    .iter()
+                    .enumerate()
+                    .map(|(i, etag)| serde_json::json!({ "partNumber": i + 1, "etag": etag }))
+                    .collect();
+                self.request_no_content(
+                    RequestInput::post(format!(
+                        "/resources/{resource_hash}/multipart/{}",
+                        resource.upload_id
+                    ))
+                    .body(serde_json::json!({ "parts": parts })),
+                )
+                .await
+            }
+            Err(e) => {
+                let _ = self
+                    .request_no_content(RequestInput::delete(format!(
+                        "/resources/{resource_hash}/multipart/{}",
+                        resource.upload_id
+                    )))
+                    .await;
+                Err(e)
+            }
+        }
+    }
+
+    /// Upload parts over parallel connections and return ETags in part order.
+    /// Memory is bounded by one in-flight chunk per connection because each
+    /// part is read from disk inside its own future.
+    async fn upload_parts(&self, path: &Path, urls: &[String]) -> Result<Vec<String>> {
+        use futures_util::stream::{StreamExt, TryStreamExt};
+        futures_util::stream::iter(urls.iter().enumerate())
+            .map(|(index, url)| {
+                let http = self.http.clone();
+                let url = url.clone();
+                let path = path.to_path_buf();
+                async move {
+                    let chunk =
+                        read_part(&path, index as u64 * Self::MULTIPART_CHUNK_SIZE).await?;
+                    upload_part(&http, &url, chunk, Self::UPLOAD_MAX_RETRIES).await
+                }
+            })
+            .buffered(Self::UPLOAD_MAX_PARALLEL)
+            .try_collect::<Vec<String>>()
+            .await
+    }
+
+    /// Make a request to a REST endpoint, discarding any response body.
+    async fn request_no_content(&self, input: RequestInput) -> Result<()> {
+        let url = format!("{}{}", self.url, input.path);
+        let mut builder = self
+            .http
+            .request(input.method, &url)
+            .header("Authorization", &self.auth);
+        if let Some(body) = input.body {
+            builder = builder
+                .header("Content-Type", "application/json")
+                .body(serde_json::to_string(&body)?);
+        }
+        let response = builder.send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let payload: serde_json::Value = response.json().await.unwrap_or_default();
+            let message = payload["errors"][0]["message"]
+                .as_str()
+                .unwrap_or("An unknown error occurred")
+                .to_string();
+            return Err(MunaError::Api {
+                message,
+                status: status.as_u16(),
+            });
+        }
+        Ok(())
+    }
+
     /// Download a resource to a file over a single connection.
     async fn download_stream(&self, url: &str, path: &Path) -> Result<()> {
         let mut response = self.http.get(url).send().await?;
@@ -408,6 +582,88 @@ async fn download_range(
         .await
         .map_err(|e| MunaError::Prediction(format!("Failed to flush file: {e}")))?;
     Ok(())
+}
+
+/// Compute the SHA-256 hex digest of a file without loading it into memory.
+async fn sha256_file(path: &Path) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    use tokio::io::AsyncReadExt;
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| MunaError::Native(format!("Failed to open resource: {e}")))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 4 * 1024 * 1024];
+    loop {
+        let n = file
+            .read(&mut buffer)
+            .await
+            .map_err(|e| MunaError::Native(format!("Failed to read resource: {e}")))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buffer[..n]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// Read one multipart chunk from a file at the given byte offset.
+async fn read_part(path: &Path, offset: u64) -> Result<Vec<u8>> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| MunaError::Native(format!("Failed to open resource: {e}")))?;
+    file.seek(std::io::SeekFrom::Start(offset))
+        .await
+        .map_err(|e| MunaError::Native(format!("Failed to seek resource: {e}")))?;
+    let mut chunk = Vec::with_capacity(MunaClient::MULTIPART_CHUNK_SIZE as usize);
+    file.take(MunaClient::MULTIPART_CHUNK_SIZE)
+        .read_to_end(&mut chunk)
+        .await
+        .map_err(|e| MunaError::Native(format!("Failed to read resource: {e}")))?;
+    Ok(chunk)
+}
+
+/// `PUT` a single part with exponential-backoff retries and return its ETag.
+async fn upload_part(
+    http: &reqwest::Client,
+    url: &str,
+    chunk: Vec<u8>,
+    max_retries: u32,
+) -> Result<String> {
+    let mut attempt = 0u32;
+    loop {
+        let result = http.put(url).body(chunk.clone()).send().await;
+        let error = match result {
+            Ok(response) => {
+                let status = response.status();
+                if status.is_success() {
+                    let etag = response
+                        .headers()
+                        .get(reqwest::header::ETAG)
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or_default()
+                        .to_string();
+                    return Ok(etag);
+                }
+                if !MunaClient::RETRYABLE_STATUS_CODES.contains(&status.as_u16()) {
+                    return Err(MunaError::Api {
+                        message: format!("Failed to upload resource part: {status}"),
+                        status: status.as_u16(),
+                    });
+                }
+                MunaError::Api {
+                    message: format!("Failed to upload resource part: {status}"),
+                    status: status.as_u16(),
+                }
+            }
+            Err(e) => MunaError::Http(e),
+        };
+        if attempt >= max_retries - 1 {
+            return Err(error);
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1 << attempt)).await;
+        attempt += 1;
+    }
 }
 
 /// Assemble downloaded part files into the destination in order.

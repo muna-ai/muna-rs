@@ -407,6 +407,13 @@ fn merge_chunks(chunks: Vec<ChatCompletionChunk>) -> Result<ChatCompletion> {
             .filter_map(|c| c.usage.as_ref())
             .map(|u| u.total_tokens)
             .sum(),
+        // Engines report prompt details (e.g. cached tokens) on the final
+        // usage-bearing chunk; sums would double-count, so take the last.
+        prompt_tokens_details: chunks
+            .iter()
+            .filter_map(|c| c.usage.as_ref())
+            .filter_map(|u| u.prompt_tokens_details.clone())
+            .last(),
     };
     Ok(ChatCompletion {
         object: "chat.completion".to_string(),
