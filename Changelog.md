@@ -1,3 +1,6 @@
+## 0.0.15
+*INCOMPLETE*
+
 ## 0.0.14
 + Added `muna.beta.openai.images.generate` method for generating images with our OpenAI-compatible client.
 + Added `BatchMode` type for inspecting the batching mode of a batched parameter.

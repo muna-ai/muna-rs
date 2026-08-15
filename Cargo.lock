@@ -600,7 +600,7 @@ dependencies = [
 
 [[package]]
 name = "muna"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "async-stream",
  "base64",
