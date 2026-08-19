@@ -9,7 +9,7 @@ pub mod client;
 pub mod services;
 pub mod types;
 
-pub use client::{MunaClient, MunaError};
+pub use client::{Client, ClientExt, DownloadProgressFn, MunaClient, MunaError};
 pub use types::*;
 
 use std::sync::Arc;
@@ -17,7 +17,7 @@ use std::sync::Arc;
 /// Muna client.
 pub struct Muna {
     /// Muna API client.
-    pub client: Arc<MunaClient>,
+    pub client: Arc<dyn Client>,
     /// Manage users.
     pub users: services::UserService,
     /// Manage predictors.
@@ -46,6 +46,13 @@ impl Muna {
             access_key.as_deref(),
             url.as_deref()
         ));
+        Self::with_client(client)
+    }
+
+    /// Create a Muna client backed by a custom [`Client`] implementation
+    /// (muna-unity parity). Custom clients typically wrap [`MunaClient`] and
+    /// forward the methods they do not change.
+    pub fn with_client(client: Arc<dyn Client>) -> Self {
         let users = services::UserService::new(client.clone());
         let predictors = services::PredictorService::new(client.clone());
         let predictions = services::PredictionService::new(client.clone());

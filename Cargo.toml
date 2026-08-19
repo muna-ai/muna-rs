@@ -18,6 +18,7 @@ version = "0.0.48"
 
 [dependencies]
 async-stream = "0.3"
+async-trait = "0.1.92"
 base64 = "0.22"
 futures-core = "0.3"
 futures-util = "0.3"

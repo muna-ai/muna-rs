@@ -1,5 +1,5 @@
 ## 0.0.15
-*INCOMPLETE*
++ Minor improvements.
 
 ## 0.0.14
 + Added `muna.beta.openai.images.generate` method for generating images with our OpenAI-compatible client.

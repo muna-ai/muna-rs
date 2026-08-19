@@ -6,7 +6,9 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::Arc;
 
+use async_trait::async_trait;
 use futures_core::Stream;
 use reqwest::Method;
 use serde::de::DeserializeOwned;
@@ -65,9 +67,14 @@ struct CreateResourceMultipartResponse {
 
 /// HTTP request input.
 pub struct RequestInput {
+    /// Request path, relative to the client's API URL (e.g. `/predictions`).
     pub path: String,
+    /// HTTP method.
     pub method: Method,
+    /// Additional request headers. `Authorization` and `Content-Type` are
+    /// set by the client and need not be provided.
     pub headers: Option<HashMap<String, String>>,
+    /// JSON request body.
     pub body: Option<serde_json::Value>,
 }
 
@@ -112,12 +119,99 @@ impl RequestInput {
     }
 }
 
+/// Boxed server-sent event stream returned by `Client::stream`.
+pub type SseStream<T> = Pin<Box<dyn Stream<Item = Result<SseEvent<T>>> + Send>>;
+
+/// Download progress callback: invoked with the byte increment of each
+/// received chunk and the file's total size when known (from the range
+/// probe; `None` when the server does not support range requests).
+///
+/// Mirrors muna-py's `progress` callable on `client.download` / `upload`.
+/// Chunks arrive concurrently on the parallel-range path, so callbacks must
+/// be cheap and thread-safe (e.g. an `indicatif` bar or an atomic counter).
+pub type DownloadProgressFn = Arc<dyn Fn(u64, Option<u64>) + Send + Sync>;
+
+/// Muna API client interface.
+///
+/// Mirrors the muna-unity `MunaClient` abstract base: `request` / `stream` /
+/// `download` / `upload` primitives with client-owned `url` and `cache_path`.
+/// All methods are required; custom clients wrap the default [`MunaClient`]
+/// and forward the methods they do not change.
+///
+/// `request` and `stream` are JSON-in/JSON-out so the trait stays object
+/// safe; [`ClientExt`] restores the typed `request_as::<T>` / `stream_as::<T>`
+/// ergonomics on top.
+#[async_trait]
+pub trait Client: Send + Sync {
+    /// Muna API URL.
+    fn url(&self) -> &str;
+
+    /// Muna cache path.
+    fn cache_path(&self) -> &Path;
+
+    /// Make a request to a REST endpoint.
+    async fn request(&self, input: RequestInput) -> Result<serde_json::Value>;
+
+    /// Make a request and consume the response as a server-sent events stream.
+    async fn stream(&self, input: RequestInput) -> Result<SseStream<serde_json::Value>>;
+
+    /// Fetch a URL's bytes into memory (value data; distinct from the file
+    /// `download` below, which supports parallel range requests).
+    async fn fetch(&self, url: &str) -> Result<Vec<u8>>;
+
+    /// Download a file, optionally reporting progress through a callback
+    /// (see [`DownloadProgressFn`]). Pass `None` to let the client decide
+    /// its own presentation (the default client is silent; custom clients
+    /// may attach bars or logs).
+    async fn download(
+        &self,
+        url: &str,
+        path: &Path,
+        progress: Option<DownloadProgressFn>,
+    ) -> Result<()>;
+
+    /// Upload a resource, returning its URL.
+    async fn upload(&self, path: &Path) -> Result<String>;
+}
+
+/// Typed conveniences over [`Client`], blanket-implemented for every client
+/// (including `dyn Client`). Kept separate because generic methods cannot
+/// live on an object-safe trait.
+#[async_trait]
+pub trait ClientExt: Client {
+
+    /// Make a request to a REST endpoint, decoding the response as `T`.
+    async fn request_as<T: DeserializeOwned>(&self, input: RequestInput) -> Result<T> {
+        let value = self.request(input).await?;
+        Ok(serde_json::from_value(value)?)
+    }
+
+    /// Make a request and consume the response as a typed server-sent
+    /// events stream.
+    async fn stream_as<T: DeserializeOwned + Send + 'static>(
+        &self,
+        input: RequestInput,
+    ) -> Result<SseStream<T>> {
+        use futures_util::StreamExt;
+        let stream = Client::stream(self, input).await?;
+        let typed = stream.map(|event| {
+            let event = event?;
+            let data: T = serde_json::from_value(event.data)?;
+            Ok(SseEvent { event: event.event, data })
+        });
+        Ok(Box::pin(typed))
+    }
+}
+
+impl<C: Client + ?Sized> ClientExt for C {}
+
 /// Muna API client.
 pub struct MunaClient {
     /// Muna API URL.
     pub url: String,
     auth: String,
     http: reqwest::Client,
+    cache_dir: PathBuf,
 }
 
 impl MunaClient {
@@ -141,12 +235,26 @@ impl MunaClient {
             .user_agent("muna-rs")
             .build()
             .expect("failed to build reqwest client");
-        Self { url, auth, http }
+        let cache_dir = get_cache_dir();
+        Self { url, auth, http, cache_dir }
     }
 
-    /// Access the underlying HTTP client.
-    pub(crate) fn http(&self) -> &reqwest::Client {
-        &self.http
+    /// Muna cache path.
+    pub fn cache_path(&self) -> &Path {
+        &self.cache_dir
+    }
+
+    /// Fetch a URL's bytes into memory.
+    pub async fn fetch(&self, url: &str) -> Result<Vec<u8>> {
+        let response = self.http.get(url).send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(MunaError::Api {
+                message: format!("Failed to fetch resource: {status}"),
+                status: status.as_u16(),
+            });
+        }
+        Ok(response.bytes().await?.to_vec())
     }
 
     /// Make a request to a REST endpoint.
@@ -243,23 +351,35 @@ impl MunaClient {
         Ok(Box::pin(stream))
     }
 
-    /// Download a resource to a file.
+    /// Download a resource to a file, optionally reporting progress through
+    /// a callback (see [`DownloadProgressFn`]).
     ///
     /// Range-capable resources are downloaded with parallel chunked range
     /// requests to saturate available bandwidth; resources whose server does
     /// not support range requests fall back to a single-connection stream.
     /// The download is atomic: data is written to a temporary file in the
     /// destination directory and renamed into place only on success.
-    pub async fn download(&self, url: &str, path: &Path) -> Result<()> {
+    pub async fn download(
+        &self,
+        url: &str,
+        path: &Path,
+        progress: Option<DownloadProgressFn>,
+    ) -> Result<()> {
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             tokio::fs::create_dir_all(parent)
                 .await
                 .map_err(|e| MunaError::Prediction(format!("Failed to create directory: {e}")))?;
         }
         let tmp_path = download_temp_path(path);
-        let result = match self.probe_download(url).await {
-            Some(size) => self.download_ranges(url, &tmp_path, size).await,
-            None => self.download_stream(url, &tmp_path).await,
+        let size = self.probe_download(url).await;
+        // Bind the probed total so the chunk loops report plain increments.
+        let progress: ChunkProgressFn = progress.map(|callback| {
+            Arc::new(move |increment: u64| callback(increment, size))
+                as Arc<dyn Fn(u64) + Send + Sync>
+        });
+        let result = match size {
+            Some(size) => self.download_ranges(url, &tmp_path, size, &progress).await,
+            None => self.download_stream(url, &tmp_path, &progress).await,
         };
         match result {
             Ok(()) => tokio::fs::rename(&tmp_path, path).await.map_err(|e| {
@@ -302,7 +422,13 @@ impl MunaClient {
     /// Download a resource using concurrent range requests. A single range
     /// (small file) streams straight to the destination; otherwise each chunk
     /// goes to its own part file which are then assembled in order.
-    async fn download_ranges(&self, url: &str, path: &Path, size: u64) -> Result<()> {
+    async fn download_ranges(
+        &self,
+        url: &str,
+        path: &Path,
+        size: u64,
+        progress: &ChunkProgressFn,
+    ) -> Result<()> {
         use futures_util::stream::{StreamExt, TryStreamExt};
         // Build the byte ranges that cover the file.
         let mut ranges: Vec<(usize, u64, u64)> = Vec::new();
@@ -318,7 +444,7 @@ impl MunaClient {
         // Small file: stream the single range straight to the destination,
         // avoiding the extra part-file assembly pass.
         if part_count <= 1 {
-            return download_range(&self.http, url, 0, size.saturating_sub(1), path).await;
+            return download_range(&self.http, url, 0, size.saturating_sub(1), path, progress).await;
         }
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
         let file_name = path
@@ -334,7 +460,8 @@ impl MunaClient {
                 let http = self.http.clone();
                 let url = url.to_string();
                 let part = part_path(i);
-                async move { download_range(&http, &url, start, end, &part).await }
+                let progress = progress.clone();
+                async move { download_range(&http, &url, start, end, &part, &progress).await }
             })
             .buffer_unordered(Self::DOWNLOAD_MAX_FILES)
             .try_collect::<Vec<()>>()
@@ -462,10 +589,12 @@ impl MunaClient {
     /// part is read from disk inside its own future.
     async fn upload_parts(&self, path: &Path, urls: &[String]) -> Result<Vec<String>> {
         use futures_util::stream::{StreamExt, TryStreamExt};
-        futures_util::stream::iter(urls.iter().enumerate())
+        // Owned URLs sidestep rustc's higher-ranked closure inference bug
+        // (rust-lang/rust#89976), triggered once `upload` is boxed via
+        // async_trait.
+        futures_util::stream::iter(urls.to_vec().into_iter().enumerate())
             .map(|(index, url)| {
                 let http = self.http.clone();
-                let url = url.clone();
                 let path = path.to_path_buf();
                 async move {
                     let chunk =
@@ -507,7 +636,12 @@ impl MunaClient {
     }
 
     /// Download a resource to a file over a single connection.
-    async fn download_stream(&self, url: &str, path: &Path) -> Result<()> {
+    async fn download_stream(
+        &self,
+        url: &str,
+        path: &Path,
+        progress: &ChunkProgressFn,
+    ) -> Result<()> {
         let mut response = self.http.get(url).send().await?;
         let status = response.status();
         if !status.is_success() {
@@ -523,11 +657,51 @@ impl MunaClient {
             file.write_all(&chunk)
                 .await
                 .map_err(|e| MunaError::Prediction(format!("Failed to write chunk: {e}")))?;
+            if let Some(report) = progress {
+                report(chunk.len() as u64);
+            }
         }
         file.flush()
             .await
             .map_err(|e| MunaError::Prediction(format!("Failed to flush file: {e}")))?;
         Ok(())
+    }
+}
+
+#[async_trait]
+impl Client for MunaClient {
+
+    fn url(&self) -> &str {
+        &self.url
+    }
+
+    fn cache_path(&self) -> &Path {
+        MunaClient::cache_path(self)
+    }
+
+    async fn request(&self, input: RequestInput) -> Result<serde_json::Value> {
+        MunaClient::request::<serde_json::Value>(self, input).await
+    }
+
+    async fn stream(&self, input: RequestInput) -> Result<SseStream<serde_json::Value>> {
+        MunaClient::stream::<serde_json::Value>(self, input).await
+    }
+
+    async fn fetch(&self, url: &str) -> Result<Vec<u8>> {
+        MunaClient::fetch(self, url).await
+    }
+
+    async fn download(
+        &self,
+        url: &str,
+        path: &Path,
+        progress: Option<DownloadProgressFn>,
+    ) -> Result<()> {
+        MunaClient::download(self, url, path, progress).await
+    }
+
+    async fn upload(&self, path: &Path) -> Result<String> {
+        MunaClient::upload(self, path).await
     }
 }
 
@@ -550,6 +724,10 @@ fn download_temp_path(path: &Path) -> PathBuf {
     parent.join(format!(".{file_name}.{nonce}.part"))
 }
 
+/// Internal chunk-increment callback: the probed total is already bound, so
+/// the download loops report plain byte increments.
+type ChunkProgressFn = Option<Arc<dyn Fn(u64) + Send + Sync>>;
+
 /// Download a single byte range to a file.
 async fn download_range(
     http: &reqwest::Client,
@@ -557,6 +735,7 @@ async fn download_range(
     start: u64,
     end: u64,
     path: &Path,
+    progress: &ChunkProgressFn,
 ) -> Result<()> {
     let mut response = http
         .get(url)
@@ -577,11 +756,41 @@ async fn download_range(
         file.write_all(&chunk)
             .await
             .map_err(|e| MunaError::Prediction(format!("Failed to write chunk: {e}")))?;
+        if let Some(report) = progress {
+            report(chunk.len() as u64);
+        }
     }
     file.flush()
         .await
         .map_err(|e| MunaError::Prediction(format!("Failed to flush file: {e}")))?;
     Ok(())
+}
+
+/// Directory for downloaded predictor resources and cached predictions.
+fn get_cache_dir() -> PathBuf {
+    let dir = get_muna_home().join("cache");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+/// Muna home directory.
+fn get_muna_home() -> PathBuf {
+    let candidates = std::env::var("MUNA_HOME")
+        .ok()
+        .map(PathBuf::from)
+        .into_iter()
+        .chain(home::home_dir().map(|h| h.join(".fxn")))
+        .chain(std::iter::once(std::env::temp_dir().join(".fxn")));
+    for dir in candidates {
+        if std::fs::create_dir_all(&dir).is_ok() {
+            let test = dir.join(".muna_write_test");
+            if std::fs::write(&test, "muna").is_ok() {
+                let _ = std::fs::remove_file(&test);
+                return dir;
+            }
+        }
+    }
+    std::env::temp_dir().join(".fxn")
 }
 
 /// Compute the SHA-256 hex digest of a file without loading it into memory.
@@ -781,7 +990,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("resource.bin");
         client
-            .download(&format!("{base}/resource"), &path)
+            .download(&format!("{base}/resource"), &path, None)
             .await
             .unwrap();
         let downloaded = std::fs::read(&path).unwrap();
@@ -817,19 +1026,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_http_accessor_fetches_bytes() {
-        // The in-memory path (used by remote.rs) fetches via the shared HTTP
-        // client exposed by `http()`.
+    async fn test_fetch_bytes() {
+        // The in-memory path (used by remote value parsing) fetches via
+        // `fetch`.
         let data = test_payload(512 * 1024);
         let base = start_server(data.clone(), true);
         let client = MunaClient::new(None, None);
-        let response = client
-            .http()
-            .get(format!("{base}/resource"))
-            .send()
-            .await
-            .unwrap();
-        let bytes = response.bytes().await.unwrap().to_vec();
+        let bytes = client.fetch(&format!("{base}/resource")).await.unwrap();
         assert!(bytes == *data);
     }
 }

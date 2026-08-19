@@ -18,7 +18,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, RwLock};
 
 use crate::c;
-use crate::client::{MunaClient, MunaError, RequestInput, Result, SseEvent};
+use crate::client::{Client, ClientExt, MunaError, RequestInput, Result, SseEvent};
 use crate::types::{
     self, Acceleration, Dtype, Prediction, PredictionResource,
     RemotePrediction, RemoteValue, Value,
@@ -27,7 +27,7 @@ use crate::types::{
 /// Make predictions.
 #[derive(Clone)]
 pub struct PredictionService {
-    client: Arc<MunaClient>,
+    client: Arc<dyn Client>,
     cache: Arc<RwLock<HashMap<PredictionCacheKey, LoadedPredictor>>>,
     operation_locks: Arc<Mutex<HashMap<PredictionCacheKey, Arc<Mutex<()>>>>>,
     cache_dir: PathBuf,
@@ -65,12 +65,15 @@ impl PredictionService {
     const CACHE_VERSION: u8 = 1;
     const REFRESH_RETRY_SECONDS: i64 = 60 * 60;
 
-    pub fn new(client: Arc<MunaClient>) -> Self {
+    pub fn new(client: Arc<dyn Client>) -> Self {
+        // The client owns the cache location (muna-unity parity); snapshot it
+        // here since resource paths never move within a process lifetime.
+        let cache_dir = client.cache_path().to_path_buf();
         Self {
             client,
             cache: Arc::new(RwLock::new(HashMap::new())),
             operation_locks: Arc::new(Mutex::new(HashMap::new())),
-            cache_dir: get_cache_dir(),
+            cache_dir,
         }
     }
 
@@ -189,9 +192,9 @@ impl PredictionService {
         });
         let remote: RemotePrediction = self
             .client
-            .request(RequestInput::post("/predictions/remote").body(body))
+            .request_as(RequestInput::post("/predictions/remote").body(body))
             .await?;
-        parse_remote_prediction(&self.client, remote).await
+        parse_remote_prediction(&*self.client, remote).await
     }
 
     async fn stream_remote(
@@ -212,13 +215,13 @@ impl PredictionService {
         });
         let event_stream = self
             .client
-            .stream::<RemotePrediction>(RequestInput::post("/predictions/remote").body(body))
+            .stream_as::<RemotePrediction>(RequestInput::post("/predictions/remote").body(body))
             .await?;
         let client = self.client.clone();
         let stream = async_stream::try_stream! {
             for await event in event_stream {
                 let event: SseEvent<RemotePrediction> = event?;
-                let prediction = parse_remote_prediction(&client, event.data).await?;
+                let prediction = parse_remote_prediction(&*client, event.data).await?;
                 yield prediction;
             }
         };
@@ -251,7 +254,7 @@ impl PredictionService {
             body["predictionId"] = serde_json::Value::String(prediction_id.to_string());
         }
         self.client
-            .request(RequestInput::post("/predictions").body(body))
+            .request_as(RequestInput::post("/predictions").body(body))
             .await
     }
 
@@ -564,7 +567,7 @@ impl PredictionService {
     async fn download_resource(&self, resource: &PredictionResource) -> Result<PredictionResource> {
         let path = self.get_resource_path(resource);
         if !path.exists() {
-            self.client.download(&resource.url, &path).await?;
+            self.client.download(&resource.url, &path, None).await?;
         }
         Ok(PredictionResource {
             url: path.to_string_lossy().into_owned(),
@@ -678,31 +681,6 @@ fn preload_output<'a>(prediction: &'a Prediction, tag: &str) -> Result<&'a str> 
             "Failed to preload {tag} because it returned no results"
         ))),
     }
-}
-
-fn get_cache_dir() -> PathBuf {
-    let dir = get_muna_home().join("cache");
-    let _ = std::fs::create_dir_all(&dir);
-    dir
-}
-
-fn get_muna_home() -> PathBuf {
-    let candidates = std::env::var("MUNA_HOME")
-        .ok()
-        .map(PathBuf::from)
-        .into_iter()
-        .chain(home::home_dir().map(|h| h.join(".fxn")))
-        .chain(std::iter::once(std::env::temp_dir().join(".fxn")));
-    for dir in candidates {
-        if std::fs::create_dir_all(&dir).is_ok() {
-            let test = dir.join(".muna_write_test");
-            if std::fs::write(&test, "muna").is_ok() {
-                let _ = std::fs::remove_file(&test);
-                return dir;
-            }
-        }
-    }
-    std::env::temp_dir().join(".fxn")
 }
 
 fn chrono_now() -> String {
@@ -843,7 +821,7 @@ fn upload_value_data(buffer: &[u8], mime: &str) -> String {
     format!("data:{mime};base64,{encoded}")
 }
 
-async fn download_value_data(client: &MunaClient, url: &str) -> Result<Vec<u8>> {
+async fn download_value_data(client: &dyn Client, url: &str) -> Result<Vec<u8>> {
     if let Some(data_part) = url.strip_prefix("data:") {
         if let Some((_mime, encoded)) = data_part.split_once(";base64,") {
             let bytes = BASE64
@@ -852,18 +830,10 @@ async fn download_value_data(client: &MunaClient, url: &str) -> Result<Vec<u8>> 
             return Ok(bytes);
         }
     }
-    let response = client.http().get(url).send().await?;
-    let status = response.status();
-    if !status.is_success() {
-        return Err(MunaError::Api {
-            message: format!("Failed to download resource: {status}"),
-            status: status.as_u16(),
-        });
-    }
-    Ok(response.bytes().await?.to_vec())
+    client.fetch(url).await
 }
 
-async fn parse_remote_value(client: &MunaClient, rv: &RemoteValue) -> Result<Value> {
+async fn parse_remote_value(client: &dyn Client, rv: &RemoteValue) -> Result<Value> {
     if rv.dtype == Dtype::Null {
         return Ok(Value::Null);
     }
@@ -915,7 +885,7 @@ async fn parse_remote_value(client: &MunaClient, rv: &RemoteValue) -> Result<Val
 }
 
 async fn parse_remote_prediction(
-    client: &MunaClient,
+    client: &dyn Client,
     prediction: RemotePrediction,
 ) -> Result<Prediction> {
     let results = match prediction.results {
@@ -968,11 +938,11 @@ mod tests {
         parse_preload_claim, preload_output, token_refresh_at, unix_now, DiskCachedPrediction,
         PredictionCacheKey, PredictionService, PreloadEntry,
     };
-    use crate::client::MunaClient;
-    use crate::types::{Acceleration, Prediction, Value};
+    use crate::client::{Client, MunaClient, MunaError, RequestInput, Result, SseStream};
+    use crate::types::{Acceleration, Prediction, PredictionResource, Value};
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use base64::Engine;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
     fn token(payload: serde_json::Value) -> String {
@@ -1024,6 +994,54 @@ mod tests {
         let mut service = PredictionService::new(Arc::new(MunaClient::new(None, Some(&url))));
         service.cache_dir = cache_dir;
         service
+    }
+
+    /// Fully fake `Client` (no network, no `MunaClient`): records download
+    /// calls and writes a marker file where the real client would.
+    struct FakeClient {
+        cache_dir: PathBuf,
+        downloads: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Client for FakeClient {
+        fn url(&self) -> &str {
+            "http://fake.invalid"
+        }
+
+        fn cache_path(&self) -> &Path {
+            &self.cache_dir
+        }
+
+        async fn request(&self, _input: RequestInput) -> Result<serde_json::Value> {
+            Err(MunaError::Prediction("fake client has no API".into()))
+        }
+
+        async fn stream(&self, _input: RequestInput) -> Result<SseStream<serde_json::Value>> {
+            Err(MunaError::Prediction("fake client has no API".into()))
+        }
+
+        async fn fetch(&self, _url: &str) -> Result<Vec<u8>> {
+            Ok(Vec::new())
+        }
+
+        async fn download(
+            &self,
+            url: &str,
+            path: &Path,
+            _progress: Option<crate::client::DownloadProgressFn>,
+        ) -> Result<()> {
+            self.downloads.lock().unwrap().push(url.to_string());
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(path, b"fake").unwrap();
+            Ok(())
+        }
+
+        async fn upload(&self, _path: &Path) -> Result<String> {
+            Err(MunaError::Prediction("fake client has no API".into()))
+        }
     }
 
     #[test]
@@ -1128,6 +1146,34 @@ mod tests {
             cache_key("linux-x86_64", "device-a"),
             cache_key("linux-x86_64", "device-b")
         );
+    }
+
+    #[tokio::test]
+    async fn injected_client_receives_resource_downloads() {
+        let cache_dir = temp_cache_dir();
+        let fake = Arc::new(FakeClient {
+            cache_dir: cache_dir.clone(),
+            downloads: std::sync::Mutex::new(Vec::new()),
+        });
+        let service = PredictionService::new(fake.clone());
+        let source = Prediction {
+            resources: Some(vec![PredictionResource {
+                kind: "dso".into(),
+                url: "https://cdn.example/resources/libfake.so".into(),
+                name: Some("libfake.so".into()),
+            }]),
+            ..prediction("pred", token(serde_json::json!({})))
+        };
+        let cached = service.create_cached_prediction(&source).await.unwrap();
+        // The download went through the injected client...
+        assert_eq!(
+            fake.downloads.lock().unwrap().as_slice(),
+            ["https://cdn.example/resources/libfake.so"]
+        );
+        // ...and the returned resource URL points at the local file it wrote.
+        let local = &cached.resources.unwrap()[0].url;
+        assert!(std::path::Path::new(local).exists());
+        assert!(local.starts_with(cache_dir.to_str().unwrap()));
     }
 
     #[tokio::test]

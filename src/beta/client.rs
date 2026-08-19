@@ -4,7 +4,7 @@
 */
 
 use super::openai::OpenAIClient;
-use crate::client::MunaClient;
+use crate::client::Client;
 use crate::services::{PredictionService, PredictorService};
 use std::sync::Arc;
 
@@ -18,7 +18,7 @@ pub struct BetaClient {
 impl BetaClient {
 
     pub fn new(
-        _: Arc<MunaClient>,
+        _: Arc<dyn Client>,
         predictors: PredictorService,
         predictions: PredictionService,
     ) -> Self {

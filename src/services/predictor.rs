@@ -5,18 +5,18 @@
 
 use std::sync::Arc;
 
-use crate::client::{MunaClient, MunaError, RequestInput, Result};
+use crate::client::{Client, ClientExt, MunaError, RequestInput, Result};
 use crate::types::Predictor;
 
 /// Manage predictors.
 #[derive(Clone)]
 pub struct PredictorService {
-    client: Arc<MunaClient>,
+    client: Arc<dyn Client>,
 }
 
 impl PredictorService {
 
-    pub fn new(client: Arc<MunaClient>) -> Self {
+    pub fn new(client: Arc<dyn Client>) -> Self {
         Self { client }
     }
 
@@ -24,7 +24,7 @@ impl PredictorService {
     pub async fn retrieve(&self, tag: &str) -> Result<Option<Predictor>> {
         match self
             .client
-            .request(RequestInput::get(format!("/predictors/{tag}")))
+            .request_as(RequestInput::get(format!("/predictors/{tag}")))
             .await
         {
             Ok(predictor) => Ok(Some(predictor)),
