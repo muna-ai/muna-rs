@@ -7,6 +7,7 @@ use super::schema::{
     ChatCompletion, ChatCompletionChoice, ChatCompletionChunk,
     ChatCompletionChunkChoice, ChatCompletionCreateParams,
     ChatCompletionDelta, ChatCompletionMessage, ChatCompletionUsage,
+    CompletionTokensDetails,
 };
 use super::utils::get_parameter;
 use crate::client::Result;
@@ -407,12 +408,17 @@ fn merge_chunks(chunks: Vec<ChatCompletionChunk>) -> Result<ChatCompletion> {
             .filter_map(|c| c.usage.as_ref())
             .map(|u| u.total_tokens)
             .sum(),
-        // Engines report prompt details (e.g. cached tokens) on the final
-        // usage-bearing chunk; sums would double-count, so take the last.
+        // Engines report token details (e.g. cached / reasoning tokens) on the
+        // final usage-bearing chunk; sums would double-count, so take the last.
         prompt_tokens_details: chunks
             .iter()
             .filter_map(|c| c.usage.as_ref())
             .filter_map(|u| u.prompt_tokens_details.clone())
+            .last(),
+        completion_tokens_details: chunks
+            .iter()
+            .filter_map(|c| c.usage.as_ref())
+            .filter_map(|u| u.completion_tokens_details.clone())
             .last(),
     };
     Ok(ChatCompletion {
@@ -440,6 +446,11 @@ fn create_completion_choice(
         .filter_map(|choice| choice.delta.as_ref())
         .filter_map(|delta| delta.content.as_deref())
         .collect::<String>();
+    let reasoning_content = choices
+        .iter()
+        .filter_map(|choice| choice.delta.as_ref())
+        .filter_map(|delta| delta.reasoning_content.as_deref())
+        .collect::<String>();
     let finish_reason = choices
         .iter()
         .filter_map(|choice| choice.finish_reason.clone())
@@ -449,6 +460,7 @@ fn create_completion_choice(
         message: ChatCompletionMessage {
             role,
             content: Some(content),
+            reasoning_content: (!reasoning_content.is_empty()).then_some(reasoning_content),
         },
         finish_reason,
         logprobs: None,
@@ -464,6 +476,7 @@ fn completion_to_chunk(completion: ChatCompletion) -> ChatCompletionChunk {
             delta: Some(ChatCompletionDelta {
                 role: Some(choice.message.role),
                 content: choice.message.content,
+                reasoning_content: choice.message.reasoning_content,
             }),
             finish_reason: choice.finish_reason,
             logprobs: choice.logprobs,
@@ -489,4 +502,91 @@ where
 {
     serde_json::from_value(serde_json::Value::Object(output))
         .map_err(|e| MunaError::Prediction(e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn chunk(
+        delta: ChatCompletionDelta,
+        usage: Option<ChatCompletionUsage>
+    ) -> ChatCompletionChunk {
+        ChatCompletionChunk {
+            object: "chat.completion.chunk".to_string(),
+            id: "chatcmpl-test".to_string(),
+            model: "test-model".to_string(),
+            choices: vec![ChatCompletionChunkChoice {
+                index: 0,
+                delta: Some(delta),
+                finish_reason: None,
+                logprobs: None,
+            }],
+            created: 0,
+            usage,
+        }
+    }
+
+    #[test]
+    fn merge_accumulates_reasoning_and_content() {
+        let chunks = vec![
+            chunk(
+                ChatCompletionDelta {
+                    role: Some("assistant".to_string()),
+                    content: None,
+                    reasoning_content: Some("Let me ".to_string()),
+                },
+                None,
+            ),
+            chunk(
+                ChatCompletionDelta {
+                    role: None,
+                    content: None,
+                    reasoning_content: Some("think.".to_string()),
+                },
+                None,
+            ),
+            chunk(
+                ChatCompletionDelta {
+                    role: None,
+                    content: Some("Paris.".to_string()),
+                    reasoning_content: None,
+                },
+                Some(ChatCompletionUsage {
+                    prompt_tokens: 10,
+                    completion_tokens: 5,
+                    total_tokens: 15,
+                    prompt_tokens_details: None,
+                    completion_tokens_details: Some(CompletionTokensDetails {
+                        reasoning_tokens: Some(3),
+                    }),
+                }),
+            ),
+        ];
+        let completion = merge_chunks(chunks).unwrap();
+        let message = &completion.choices[0].message;
+        assert_eq!(message.content.as_deref(), Some("Paris."));
+        assert_eq!(message.reasoning_content.as_deref(), Some("Let me think."));
+        let usage = completion.usage.unwrap();
+        let details = usage.completion_tokens_details.unwrap();
+        assert_eq!(details.reasoning_tokens, Some(3));
+    }
+
+    #[test]
+    fn merge_without_reasoning_leaves_field_absent() {
+        let chunks = vec![chunk(
+            ChatCompletionDelta {
+                role: Some("assistant".to_string()),
+                content: Some("Hello.".to_string()),
+                reasoning_content: None,
+            },
+            None,
+        )];
+        let completion = merge_chunks(chunks).unwrap();
+        let message = &completion.choices[0].message;
+        assert_eq!(message.reasoning_content, None);
+        // Absent reasoning must not appear on the wire (skip_serializing_if).
+        let json = serde_json::to_value(message).unwrap();
+        assert!(json.get("reasoning_content").is_none());
+    }
 }

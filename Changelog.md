@@ -1,5 +1,7 @@
 ## 0.0.16
-*INCOMPLETE*
++ Added `ChatCompletionMessage.reasoning_content` field in the OpenAI-compatible client, following the DeepSeek convention for reasoning models.
++ Added `ChatCompletionDelta.reasoning_content` field in the OpenAI-compatible client for streaming reasoning deltas.
++ Added `ChatCompletionUsage.completion_tokens_details` field in the OpenAI-compatible client for tracking reasoning tokens.
 
 ## 0.0.15
 + Minor improvements.

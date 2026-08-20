@@ -142,6 +142,7 @@ fn chat_params() -> ChatCompletionCreateParams {
         messages: vec![ChatCompletionMessage {
             role: "user".to_string(),
             content: Some("Say hello in one sentence.".to_string()),
+            reasoning_content: None,
         }],
         ..Default::default()
     }
