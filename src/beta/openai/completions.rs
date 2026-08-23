@@ -3,23 +3,25 @@
 *   Copyright © 2026 NatML Inc. All Rights Reserved.
 */
 
-use super::schema::{
-    ChatCompletion, ChatCompletionChoice, ChatCompletionChunk,
-    ChatCompletionChunkChoice, ChatCompletionCreateParams,
-    ChatCompletionDelta, ChatCompletionMessage, ChatCompletionUsage,
-    CompletionTokensDetails,
-};
-use super::utils::get_parameter;
-use crate::client::Result;
-use crate::services::{PredictionService, PredictorService};
-use crate::types::{Acceleration, Dtype, Parameter, Prediction, Value};
-use crate::MunaError;
-use futures_core::Stream;
-use futures_util::StreamExt;
 use std::collections::{BTreeMap, HashMap};
 use std::pin::Pin;
 use std::sync::Arc;
+
+use futures_core::Stream;
+use futures_util::StreamExt;
 use tokio::sync::RwLock;
+
+use crate::beta::utils::get_parameter;
+use crate::client::Result;
+use crate::MunaError;
+use crate::services::{PredictionService, PredictorService};
+use crate::types::{Acceleration, Dtype, Parameter, Prediction, Value};
+
+use super::schema::{
+    ChatCompletion, ChatCompletionChoice, ChatCompletionChunk,
+    ChatCompletionChunkChoice, ChatCompletionCreateParams,
+    ChatCompletionMessage, ChatCompletionUsage,
+};
 
 /// Stream of chat completion chunks.
 pub type ChatCompletionStream = Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk>> + Send>>;
@@ -71,12 +73,12 @@ impl ChatCompletionService {
             .predictions
             .stream(&model, input_map, Some(acceleration))
             .await?;
-        let mut outputs = Vec::new();
+        let mut chunks = Vec::new();
         while let Some(prediction) = prediction_stream.next().await {
             let output = gather_completion_output(prediction?, completion_param_idx, &model)?;
-            outputs.push(output);
+            chunks.push(parse_chat_completion_chunk(output)?);
         }
-        parse_chat_completion(outputs)
+        merge_chunks(chunks)
     }
 
     /// Stream a chat completion.
@@ -275,14 +277,13 @@ impl ChatCompletionService {
                         .as_ref()
                         .and_then(|s| s.get("title"))
                         .and_then(|v| v.as_str())
-                        .is_some_and(|title| {
-                            title == "ChatCompletion" || title == "ChatCompletionChunk"
-                        })
+                        .is_some_and(|title| title == "ChatCompletionChunk")
             })
             .ok_or_else(|| {
                 MunaError::Prediction(format!(
                     "{tag} cannot be used with OpenAI chat completions API because \
-                it does not have a valid chat completion output parameter."
+                it does not have a valid chat completion chunk output parameter. \
+                Chat predictors must yield `ChatCompletionChunk` outputs."
                 ))
             })?;
         Ok(DelegateInfo {
@@ -321,54 +322,15 @@ fn gather_completion_output(
     }
 }
 
-fn parse_chat_completion(
-    outputs: Vec<serde_json::Map<String, serde_json::Value>>,
-) -> Result<ChatCompletion> {
-    if outputs.is_empty() {
-        return Err(MunaError::Prediction(
-            "Failed to parse chat completion because model did not return any outputs".into(),
-        ));
-    }
-    if outputs
-        .iter()
-        .all(|o| object_kind(o) == Some("chat.completion"))
-    {
-        let mut completions = outputs
-            .into_iter()
-            .map(from_object::<ChatCompletion>)
-            .collect::<Result<Vec<_>>>()?;
-        return completions.pop().ok_or_else(|| {
-            MunaError::Prediction(
-                "Failed to parse chat completion because model did not return any outputs".into(),
-            )
-        });
-    }
-    if outputs
-        .iter()
-        .all(|o| object_kind(o) == Some("chat.completion.chunk"))
-    {
-        let chunks = outputs
-            .into_iter()
-            .map(from_object::<ChatCompletionChunk>)
-            .collect::<Result<Vec<_>>>()?;
-        return merge_chunks(chunks);
-    }
-    Err(MunaError::Prediction(
-        "Failed to parse chat completion from model outputs".into(),
-    ))
-}
-
 fn parse_chat_completion_chunk(
     output: serde_json::Map<String, serde_json::Value>,
 ) -> Result<ChatCompletionChunk> {
     match object_kind(&output) {
         Some("chat.completion.chunk") => from_object(output),
-        Some("chat.completion") => {
-            let completion = from_object::<ChatCompletion>(output)?;
-            Ok(completion_to_chunk(completion))
-        }
         _ => Err(MunaError::Prediction(
-            "Failed to parse streaming chat completion chunk from model output".into(),
+            "Failed to parse chat completion chunk from model output. \
+            Chat predictors must yield `ChatCompletionChunk` outputs."
+                .into(),
         )),
     }
 }
@@ -467,31 +429,6 @@ fn create_completion_choice(
     }
 }
 
-fn completion_to_chunk(completion: ChatCompletion) -> ChatCompletionChunk {
-    let choices = completion
-        .choices
-        .into_iter()
-        .map(|choice| ChatCompletionChunkChoice {
-            index: choice.index,
-            delta: Some(ChatCompletionDelta {
-                role: Some(choice.message.role),
-                content: choice.message.content,
-                reasoning_content: choice.message.reasoning_content,
-            }),
-            finish_reason: choice.finish_reason,
-            logprobs: choice.logprobs,
-        })
-        .collect();
-    ChatCompletionChunk {
-        object: "chat.completion.chunk".to_string(),
-        id: completion.id,
-        model: completion.model,
-        choices,
-        created: completion.created,
-        usage: completion.usage,
-    }
-}
-
 fn object_kind(output: &serde_json::Map<String, serde_json::Value>) -> Option<&str> {
     output.get("object").and_then(|v| v.as_str())
 }
@@ -507,6 +444,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::beta::openai::{ChatCompletionDelta, CompletionTokensDetails};
 
     fn chunk(
         delta: ChatCompletionDelta,

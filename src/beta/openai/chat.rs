@@ -3,8 +3,9 @@
 *   Copyright © 2026 NatML Inc. All Rights Reserved.
 */
 
-use super::ChatCompletionService;
 use crate::services::{PredictionService, PredictorService};
+
+use super::ChatCompletionService;
 
 /// Create chat conversations.
 #[derive(Clone)]

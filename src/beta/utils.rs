@@ -5,7 +5,7 @@
 
 use crate::types::{Dtype, Parameter};
 
-pub fn get_parameter<'a>(
+pub(crate) fn get_parameter<'a>(
     parameters: &'a [Parameter],
     dtypes: &[Dtype],
     denotation: Option<&str>,

@@ -3,17 +3,20 @@
 *   Copyright © 2026 NatML Inc. All Rights Reserved.
 */
 
-use super::schema::{Embedding, EmbeddingCreateResponse, EmbeddingData, EmbeddingUsage};
-use super::utils::get_parameter;
-use crate::client::Result;
-use crate::services::{PredictionService, PredictorService};
-use crate::types::{Acceleration, Dtype, Parameter, TensorData, Value};
-use crate::MunaError;
-use base64::engine::general_purpose::STANDARD as BASE64;
-use base64::Engine;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use tokio::sync::RwLock;
+
+use crate::beta::utils::get_parameter;
+use crate::client::Result;
+use crate::MunaError;
+use crate::services::{PredictionService, PredictorService};
+use crate::types::{Acceleration, Dtype, Parameter, TensorData, Value};
+
+use super::schema::{Embedding, EmbeddingCreateResponse, EmbeddingData, EmbeddingUsage};
 
 /// Cached predictor metadata for fast embedding creation.
 struct DelegateInfo {

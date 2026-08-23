@@ -3,8 +3,9 @@
 *   Copyright © 2026 NatML Inc. All Rights Reserved.
 */
 
-use super::Dtype;
 use serde::{Deserialize, Serialize};
+
+use super::Dtype;
 
 /// Tensor data buffer.
 #[derive(Debug, Clone)]

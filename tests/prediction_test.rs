@@ -3,9 +3,10 @@
 *   Copyright © 2026 NatML Inc. All Rights Reserved.
 */
 
+use std::collections::HashMap;
+
 use futures_util::StreamExt;
 use muna::{Muna, MunaError, Value};
-use std::collections::HashMap;
 
 #[tokio::test]
 async fn test_create_raw_prediction() {

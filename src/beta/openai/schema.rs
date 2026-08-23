@@ -3,8 +3,9 @@
 *   Copyright © 2026 NatML Inc. All Rights Reserved.
 */
 
-use crate::types::{Acceleration, Image};
 use serde::{Deserialize, Serialize};
+
+use crate::types::{Acceleration, Image};
 
 /// Chat message.
 #[derive(Debug, Clone, Serialize, Deserialize)]

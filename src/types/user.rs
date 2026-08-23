@@ -3,8 +3,9 @@
 *   Copyright © 2026 NatML Inc. All Rights Reserved.
 */
 
-use serde::{Deserialize, Serialize};
 use std::fmt;
+
+use serde::{Deserialize, Serialize};
 
 /// Muna user.
 #[derive(Debug, Clone, Serialize, Deserialize)]

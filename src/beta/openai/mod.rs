@@ -8,7 +8,6 @@ mod completions;
 mod embeddings;
 mod images;
 mod schema;
-mod utils;
 
 pub use chat::*;
 pub use completions::*;

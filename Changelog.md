@@ -1,5 +1,7 @@
 ## 0.0.17
-*INCOMPLETE*
++ Added `muna.beta.anthropic.messages.create` method for creating messages with our Anthropic-compatible client.
++ Added `muna.beta.anthropic.messages.stream` method for streaming raw message stream events with our Anthropic-compatible client.
++ Refactored OpenAI-compatible client to require that chat predictors yield `ChatCompletionChunk` outputs. Predictors that return a full `ChatCompletion` are no longer supported.
 
 ## 0.0.16
 + Added `ChatCompletionMessage.reasoning_content` field in the OpenAI-compatible client, following the DeepSeek convention for reasoning models.
