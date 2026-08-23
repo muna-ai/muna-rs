@@ -1,3 +1,6 @@
+## 0.0.18
+*INCOMPLETE*
+
 ## 0.0.17
 + Added `muna.beta.anthropic.messages.create` method for creating messages with our Anthropic-compatible client.
 + Added `muna.beta.anthropic.messages.stream` method for streaming raw message stream events with our Anthropic-compatible client.
