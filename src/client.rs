@@ -27,6 +27,11 @@ pub enum MunaError {
     /// Prediction error.
     #[error("{0}")]
     Prediction(String),
+    /// Invalid input provided by the caller (e.g. an unsupported or
+    /// malformed content part). Servers should surface this as a client
+    /// error rather than an internal error.
+    #[error("{0}")]
+    InvalidInput(String),
     /// JSON serialization error.
     #[error(transparent)]
     Json(#[from] serde_json::Error),

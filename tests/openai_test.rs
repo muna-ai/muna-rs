@@ -5,8 +5,9 @@
 
 use futures_util::StreamExt;
 use muna::beta::openai::{
-    ChatCompletionCreateParams, ChatCompletionMessage,
-    EmbeddingData, EncodingFormat, ImageCreateParams,
+    ChatCompletionContent, ChatCompletionCreateParams,
+    ChatCompletionMessage, EmbeddingData, EncodingFormat,
+    ImageCreateParams,
 };
 use muna::Muna;
 
@@ -141,8 +142,10 @@ fn chat_params() -> ChatCompletionCreateParams {
         model: "@huggingface/smollm2-360m".to_string(),
         messages: vec![ChatCompletionMessage {
             role: "user".to_string(),
-            content: Some("Say hello in one sentence.".to_string()),
+            content: Some(ChatCompletionContent::Text("Say hello in one sentence.".to_string())),
             reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: None,
         }],
         ..Default::default()
     }

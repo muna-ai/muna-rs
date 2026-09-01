@@ -1,5 +1,9 @@
 ## 0.0.18
-*INCOMPLETE*
++ Added support for tool calling in the OpenAI-compatible client.
++ Added support for tool calling in the Anthropic-compatible client.
++ Added support for OpenAI content parts in the OpenAI-compatible client. See `ChatCompletionContent` and `ChatCompletionContentPart` enums.
++ Added `MunaError::InvalidInput` error variant for caller-fault errors (e.g. unsupported or malformed content parts), allowing servers to surface them as client errors.
++ Refactored the Anthropic-compatible client into a pure adapter over the OpenAI chat completions contract. Chat predictors must yield `ChatCompletionChunk` outputs.
 
 ## 0.0.17
 + Added `muna.beta.anthropic.messages.create` method for creating messages with our Anthropic-compatible client.

@@ -19,9 +19,9 @@ use crate::services::{PredictionService, PredictorService};
 use crate::types::{Acceleration, Dtype, Parameter, Prediction, Value};
 
 use super::schema::{
-    ContentBlock, ContentBlockDelta, Message, MessageCreateParams,
-    MessageDelta, MessageParam, RawMessageStreamEvent, StopReason,
-    Usage,
+    ContentBlock, ContentBlockDelta, ContentBlockParam, Message,
+    MessageContent, MessageCreateParams, MessageDelta, MessageParam,
+    RawMessageStreamEvent, StopReason, Tool, Usage,
 };
 
 /// Stream of raw message stream events.
@@ -33,24 +33,19 @@ type OutputStream = Pin<Box<dyn Stream<Item = Result<serde_json::Map<String, ser
 /// Stream of chat completion chunks.
 type ChunkStream = Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk>> + Send>>;
 
-/// Whether the underlying predictor is written against the OpenAI chat
-/// completions API or the Anthropic messages API.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum DelegateKind {
-    OpenAI,
-    Native,
-}
-
-/// Cached predictor metadata for fast message creation.
+/// Cached predictor metadata for fast message creation. Chat predictors
+/// always speak the OpenAI chat completions contract; this surface is a
+/// pure adapter that translates Anthropic requests and responses to and
+/// from it.
 #[derive(Clone)]
 struct DelegateInfo {
-    kind: DelegateKind,
     input_param_name: String,
     max_tokens_param_name: Option<String>,
     stop_sequences_param_name: Option<String>,
     temperature_param_name: Option<String>,
     top_k_param_name: Option<String>,
     top_p_param_name: Option<String>,
+    tools_param_name: Option<String>,
     output_param_idx: usize,
 }
 
@@ -94,7 +89,6 @@ impl MessageService {
         let model = params.model.clone();
         let (
             input_map,
-            kind,
             output_param_idx,
             acceleration
         ) = self.prepare_prediction(params).await?;
@@ -102,18 +96,18 @@ impl MessageService {
             .predictions
             .stream(&model, input_map, Some(acceleration))
             .await?;
-        let outputs = gather_prediction_outputs(prediction_stream, output_param_idx, model);
-        let events = match kind {
-            DelegateKind::OpenAI => events_from_chunks(parse_completion_chunks(outputs)),
-            DelegateKind::Native => events_from_native_outputs(outputs),
-        };
-        Ok(events)
+        let outputs = gather_prediction_outputs(
+            prediction_stream,
+            output_param_idx,
+            model
+        );
+        Ok(events_from_chunks(parse_completion_chunks(outputs)))
     }
 
     async fn prepare_prediction(
         &self,
         params: MessageCreateParams,
-    ) -> Result<(HashMap<String, Value>, DelegateKind, usize, Acceleration)> {
+    ) -> Result<(HashMap<String, Value>, usize, Acceleration)> {
         self.ensure_delegate_info(&params.model).await?;
         let info = {
             let cache = self.cache.read().await;
@@ -125,39 +119,19 @@ impl MessageService {
                 ))
             })?
         };
-        // Build the message list, folding the system prompt into the messages.
-        // Predictors that need the system prompt separately can filter it out.
-        let messages = match info.kind {
-            DelegateKind::OpenAI => {
-                let mut messages = Vec::new();
-                if let Some(system) = &params.system {
-                    messages.push(serde_json::json!({
-                        "role": "system",
-                        "content": system.flatten(),
-                    }));
-                }
-                for message in &params.messages {
-                    messages.push(serde_json::json!({
-                        "role": message.role,
-                        "content": message.content.flatten(),
-                    }));
-                }
-                messages
-            }
-            DelegateKind::Native => {
-                let mut messages = Vec::new();
-                if let Some(system) = &params.system {
-                    messages.push(serde_json::to_value(MessageParam {
-                        role: "system".to_string(),
-                        content: system.clone(),
-                    })?);
-                }
-                for message in &params.messages {
-                    messages.push(serde_json::to_value(message)?);
-                }
-                messages
-            }
-        };
+        // Build the OpenAI-shaped message list, folding the system prompt
+        // into the messages. Predictors that need the system prompt
+        // separately can filter it out.
+        let mut messages = Vec::new();
+        if let Some(system) = &params.system {
+            messages.push(serde_json::json!({
+                "role": "system",
+                "content": system.flatten(),
+            }));
+        }
+        for message in &params.messages {
+            translate_message_for_openai(message, &mut messages);
+        }
         let mut input_map = HashMap::new();
         input_map.insert(info.input_param_name, Value::List(messages));
         if let Some(name) = info.max_tokens_param_name {
@@ -177,8 +151,21 @@ impl MessageService {
         if let (Some(value), Some(name)) = (params.top_p, info.top_p_param_name) {
             input_map.insert(name, Value::Float(value));
         }
+        if let Some(tools) = &params.tools {
+            if !tools.is_empty() {
+                let Some(name) = info.tools_param_name else {
+                    return Err(MunaError::InvalidInput(format!(
+                        "{} does not support tool calling because it does not \
+                        declare a tools input parameter.",
+                        params.model
+                    )));
+                };
+                let tools = tools.iter().map(openai_tool).collect();
+                input_map.insert(name, Value::List(tools));
+            }
+        }
         let acceleration = params.acceleration.unwrap_or(Acceleration::LocalAuto);
-        Ok((input_map, info.kind, info.output_param_idx, acceleration))
+        Ok((input_map, info.output_param_idx, acceleration))
     }
 
     async fn ensure_delegate_info(&self, tag: &str) -> Result<()> {
@@ -256,32 +243,10 @@ impl MessageService {
         )
         .1
         .map(|p| p.name.clone());
-        // Check whether the predictor is written against the OpenAI chat completions API.
-        // If not, assume it is written against the Anthropic messages API.
-        let completion_param_idx = signature
-            .outputs
-            .iter()
-            .position(|param| {
-                param.dtype == Some(Dtype::Dict)
-                    && param
-                        .schema
-                        .as_ref()
-                        .and_then(|s| s.get("title"))
-                        .and_then(|v| v.as_str())
-                        .is_some_and(|title| title == "ChatCompletionChunk")
-            });
-        if let Some(output_param_idx) = completion_param_idx {
-            return Ok(DelegateInfo {
-                kind: DelegateKind::OpenAI,
-                input_param_name: input_param.name.clone(),
-                max_tokens_param_name,
-                stop_sequences_param_name: None,
-                temperature_param_name,
-                top_k_param_name: None,
-                top_p_param_name,
-                output_param_idx,
-            });
-        }
+        // Anthropic-specific knobs (stop sequences, top-k) keep their own
+        // denotations: parameter denotations describe input meaning and are
+        // orthogonal to the output contract, so an OpenAI-shaped predictor
+        // can declare them for this surface.
         let stop_sequences_param_name = get_parameter(
             &signature.inputs,
             &[Dtype::List],
@@ -296,39 +261,129 @@ impl MessageService {
         )
         .1
         .map(|p| p.name.clone());
+        let tools_param_name = get_parameter(
+            &signature.inputs,
+            &[Dtype::List],
+            Some("openai.chat.completions.tools"),
+        )
+        .1
+        .map(|p| p.name.clone());
         let output_param_idx = signature
             .outputs
             .iter()
-            .position(|param| param.dtype == Some(Dtype::Dict))
+            .position(|param| {
+                param.dtype == Some(Dtype::Dict)
+                    && param
+                        .schema
+                        .as_ref()
+                        .and_then(|s| s.get("title"))
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|title| title == "ChatCompletionChunk")
+            })
             .ok_or_else(|| {
                 MunaError::Prediction(format!(
                     "{tag} cannot be used with Anthropic messages API because \
-                it does not have a valid message output parameter."
+                it does not have a valid chat completion chunk output parameter. \
+                Chat predictors must yield `ChatCompletionChunk` outputs."
                 ))
             })?;
         Ok(DelegateInfo {
-            kind: DelegateKind::Native,
             input_param_name: input_param.name.clone(),
             max_tokens_param_name,
             stop_sequences_param_name,
             temperature_param_name,
             top_k_param_name,
             top_p_param_name,
+            tools_param_name,
             output_param_idx,
         })
     }
 }
 
+/// Convert an Anthropic tool definition into the OpenAI function tool
+/// shape expected by the delegate's tools input parameter.
+fn openai_tool(tool: &Tool) -> serde_json::Value {
+    serde_json::json!({
+        "type": "function",
+        "function": {
+            "name": tool.name,
+            "description": tool.description,
+            "parameters": tool.input_schema,
+        }
+    })
+}
+
+/// Translate one Anthropic input message into OpenAI-shaped messages.
+/// Text blocks stay on the original role (flattened, joined by newline);
+/// replayed `tool_use` blocks become assistant `tool_calls`; `tool_result`
+/// blocks become `tool` role messages bound by `tool_call_id`. Block order
+/// is preserved by flushing the pending text run before each tool block.
+fn translate_message_for_openai(
+    message: &MessageParam,
+    messages: &mut Vec<serde_json::Value>
+) {
+    let MessageContent::Blocks(blocks) = &message.content else {
+        messages.push(serde_json::json!({
+            "role": message.role,
+            "content": message.content.flatten(),
+        }));
+        return;
+    };
+    let mut text_run: Vec<&str> = Vec::new();
+    let flush = |text_run: &mut Vec<&str>, messages: &mut Vec<serde_json::Value>| {
+        if !text_run.is_empty() {
+            messages.push(serde_json::json!({
+                "role": message.role,
+                "content": text_run.join("\n"),
+            }));
+            text_run.clear();
+        }
+    };
+    for block in blocks {
+        match block {
+            ContentBlockParam::Text { text } => {
+                text_run.push(text.as_str());
+            }
+            ContentBlockParam::ToolUse { id, name, input } => {
+                flush(&mut text_run, messages);
+                messages.push(serde_json::json!({
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": id,
+                        "type": "function",
+                        "function": { "name": name, "arguments": input.to_string() },
+                    }],
+                }));
+            }
+            ContentBlockParam::ToolResult { tool_use_id, content, .. } => {
+                flush(&mut text_run, messages);
+                messages.push(serde_json::json!({
+                    "role": "tool",
+                    "tool_call_id": tool_use_id,
+                    "content": content.as_ref().map(|c| c.flatten()),
+                }));
+            }
+        }
+    }
+    flush(&mut text_run, messages);
+}
+
 /// Kind of content block being streamed.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 enum BlockKind {
     Thinking,
     Text,
+    /// Tool-use block; id and name arrive on the first tool call fragment.
+    ToolUse {
+        id: String,
+        name: String,
+    },
 }
 
 impl BlockKind {
 
-    fn empty_block(self) -> ContentBlock {
+    fn empty_block(&self) -> ContentBlock {
         match self {
             Self::Thinking => ContentBlock::Thinking {
                 thinking: String::new(),
@@ -337,16 +392,24 @@ impl BlockKind {
             Self::Text => ContentBlock::Text {
                 text: String::new(),
             },
+            Self::ToolUse { id, name } => ContentBlock::ToolUse {
+                id: id.clone(),
+                name: name.clone(),
+                input: serde_json::json!({}),
+            },
         }
     }
 
-    fn delta(self, fragment: &str) -> ContentBlockDelta {
+    fn delta(&self, fragment: &str) -> ContentBlockDelta {
         match self {
             Self::Thinking => ContentBlockDelta::ThinkingDelta {
                 thinking: fragment.to_string(),
             },
             Self::Text => ContentBlockDelta::TextDelta {
                 text: fragment.to_string(),
+            },
+            Self::ToolUse { .. } => ContentBlockDelta::InputJsonDelta {
+                partial_json: fragment.to_string(),
             },
         }
     }
@@ -464,21 +527,62 @@ fn events_from_chunks(mut chunks: ChunkStream) -> MessageEventStream {
                 if fragment.is_empty() {
                     continue;
                 }
-                if block_kind != Some(kind) {
+                if block_kind.as_ref() != Some(&kind) {
                     if block_kind.is_some() {
                         yield RawMessageStreamEvent::ContentBlockStop { index: block_idx };
                         block_idx += 1;
                     }
-                    block_kind = Some(kind);
                     yield RawMessageStreamEvent::ContentBlockStart {
                         index: block_idx,
                         content_block: kind.empty_block(),
                     };
+                    block_kind = Some(kind.clone());
                 }
                 yield RawMessageStreamEvent::ContentBlockDelta {
                     index: block_idx,
                     delta: kind.delta(&fragment),
                 };
+            }
+            // Tool call fragments are a third channel beside reasoning and
+            // content: a fragment carrying an id starts a new tool-use block;
+            // argument fragments stream as input JSON deltas.
+            let Some(tool_fragments) = &delta.tool_calls else {
+                continue;
+            };
+            for fragment in tool_fragments {
+                if let Some(id) = &fragment.id {
+                    if block_kind.is_some() {
+                        yield RawMessageStreamEvent::ContentBlockStop { index: block_idx };
+                        block_idx += 1;
+                    }
+                    let name = fragment
+                        .function
+                        .as_ref()
+                        .and_then(|f| f.name.clone())
+                        .unwrap_or_default();
+                    let kind = BlockKind::ToolUse { id: id.clone(), name };
+                    yield RawMessageStreamEvent::ContentBlockStart {
+                        index: block_idx,
+                        content_block: kind.empty_block(),
+                    };
+                    block_kind = Some(kind);
+                }
+                let arguments = fragment
+                    .function
+                    .as_ref()
+                    .and_then(|f| f.arguments.as_ref());
+                if let Some(arguments) = arguments {
+                    if !arguments.is_empty() &&
+                        matches!(block_kind, Some(BlockKind::ToolUse { .. }))
+                    {
+                        yield RawMessageStreamEvent::ContentBlockDelta {
+                            index: block_idx,
+                            delta: ContentBlockDelta::InputJsonDelta {
+                                partial_json: arguments.clone(),
+                            },
+                        };
+                    }
+                }
             }
         }
         if block_kind.is_some() {
@@ -492,24 +596,6 @@ fn events_from_chunks(mut chunks: ChunkStream) -> MessageEventStream {
             usage,
         };
         yield RawMessageStreamEvent::MessageStop;
-    })
-}
-
-/// Parse each dict output as a raw message stream event.
-fn events_from_native_outputs(mut outputs: OutputStream) -> MessageEventStream {
-    Box::pin(async_stream::try_stream! {
-        while let Some(output) = outputs.next().await {
-            let output = output?;
-            let event = serde_json::from_value::<RawMessageStreamEvent>(
-                serde_json::Value::Object(output)
-            )
-            .map_err(|_| MunaError::Prediction(
-                "Failed to parse message stream event from model output. \
-                Message predictors must yield `RawMessageStreamEvent` outputs."
-                    .into(),
-            ))?;
-            yield event;
-        }
     })
 }
 
@@ -536,7 +622,27 @@ fn apply_event(message: &mut Option<Message>, event: &RawMessageStreamEvent) {
                             ContentBlock::Thinking { thinking, .. },
                             ContentBlockDelta::ThinkingDelta { thinking: fragment },
                         ) => thinking.push_str(fragment),
+                        // Input JSON fragments buffer as a string on the
+                        // block's `input`; the buffer is parsed into the
+                        // final input object when the block stops.
+                        (
+                            ContentBlock::ToolUse { input, .. },
+                            ContentBlockDelta::InputJsonDelta { partial_json },
+                        ) => match input {
+                            serde_json::Value::String(buffer) => buffer.push_str(partial_json),
+                            _ => *input = serde_json::Value::String(partial_json.clone()),
+                        },
                         _ => {}
+                    }
+                }
+            }
+        }
+        RawMessageStreamEvent::ContentBlockStop { index } => {
+            if let Some(message) = message {
+                if let Some(ContentBlock::ToolUse { input, .. }) = message.content.get_mut(*index) {
+                    if let serde_json::Value::String(buffer) = input {
+                        *input = serde_json::from_str(buffer)
+                            .unwrap_or_else(|_| serde_json::json!({}));
                     }
                 }
             }
@@ -628,6 +734,7 @@ mod tests {
                     role: Some("assistant".to_string()),
                     content: None,
                     reasoning_content: Some("Let me think.".to_string()),
+                    tool_calls: None,
                 },
                 None,
                 None,
@@ -637,6 +744,7 @@ mod tests {
                     role: None,
                     content: Some("Paris.".to_string()),
                     reasoning_content: None,
+                    tool_calls: None,
                 },
                 Some("stop"),
                 Some(ChatCompletionUsage {
@@ -692,6 +800,7 @@ mod tests {
                 role: Some("assistant".to_string()),
                 content: Some("Hello".to_string()),
                 reasoning_content: None,
+                tool_calls: None,
             },
             Some("length"),
             None,
@@ -699,6 +808,91 @@ mod tests {
         .await;
         let message = accumulate(&events);
         assert_eq!(message.stop_reason, Some(StopReason::MaxTokens));
+    }
+
+    #[tokio::test]
+    async fn tool_call_deltas_become_tool_use_blocks() {
+        // Fragments: id + name first, then two argument fragments, ending
+        // with a `tool_calls` finish reason.
+        let deltas: Vec<ChatCompletionDelta> = vec![
+            serde_json::from_value(serde_json::json!({
+                "role": "assistant",
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "call_test_0",
+                    "type": "function",
+                    "function": { "name": "get_weather", "arguments": "" },
+                }],
+            })).unwrap(),
+            serde_json::from_value(serde_json::json!({
+                "tool_calls": [{
+                    "index": 0,
+                    "function": { "arguments": "{\"location\": " },
+                }],
+            })).unwrap(),
+            serde_json::from_value(serde_json::json!({
+                "tool_calls": [{
+                    "index": 0,
+                    "function": { "arguments": "\"Paris\"}" },
+                }],
+            })).unwrap(),
+        ];
+        let mut chunks: Vec<ChatCompletionChunk> = deltas
+            .into_iter()
+            .map(|delta| chunk(delta, None, None))
+            .collect();
+        chunks.push(chunk(ChatCompletionDelta::default(), Some("tool_calls"), None));
+        let events = collect_events(chunks).await;
+        let message = accumulate(&events);
+        assert!(matches!(
+            &message.content[0],
+            ContentBlock::ToolUse { id, name, input }
+                if id == "call_test_0" &&
+                    name == "get_weather" &&
+                    *input == serde_json::json!({ "location": "Paris" })
+        ));
+        assert_eq!(message.stop_reason, Some(StopReason::ToolUse));
+        // Wire tags: tool_use block start and input_json_delta fragments.
+        let start = events.iter().find(|e| e.event_type() == "content_block_start").unwrap();
+        let json = serde_json::to_value(start).unwrap();
+        assert_eq!(json["content_block"]["type"], "tool_use");
+        let delta = events.iter().find(|e| e.event_type() == "content_block_delta").unwrap();
+        let json = serde_json::to_value(delta).unwrap();
+        assert_eq!(json["delta"]["type"], "input_json_delta");
+    }
+
+    #[test]
+    fn tool_blocks_translate_to_openai_messages() {
+        // Assistant turn replaying a tool call, then a user turn with the result.
+        let assistant: MessageParam = serde_json::from_value(serde_json::json!({
+            "role": "assistant",
+            "content": [
+                { "type": "text", "text": "Checking the weather." },
+                { "type": "tool_use", "id": "call_123", "name": "get_weather",
+                  "input": { "city": "Paris" } },
+            ],
+        })).unwrap();
+        let user: MessageParam = serde_json::from_value(serde_json::json!({
+            "role": "user",
+            "content": [
+                { "type": "tool_result", "tool_use_id": "call_123",
+                  "content": "18C and sunny" },
+            ],
+        })).unwrap();
+        let mut messages = Vec::new();
+        translate_message_for_openai(&assistant, &mut messages);
+        translate_message_for_openai(&user, &mut messages);
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0]["role"], "assistant");
+        assert_eq!(messages[0]["content"], "Checking the weather.");
+        assert_eq!(messages[1]["tool_calls"][0]["id"], "call_123");
+        assert_eq!(
+            messages[1]["tool_calls"][0]["function"]["arguments"],
+            "{\"city\":\"Paris\"}"
+        );
+        assert_eq!(messages[2]["role"], "tool");
+        assert_eq!(messages[2]["tool_call_id"], "call_123");
+        assert_eq!(messages[2]["content"], "18C and sunny");
     }
 
     #[test]
@@ -775,25 +969,5 @@ mod tests {
         assert_eq!(json["delta"]["text"], "Hi");
         let round_trip: RawMessageStreamEvent = serde_json::from_value(json).unwrap();
         assert_eq!(round_trip.event_type(), "content_block_delta");
-    }
-
-    #[test]
-    fn native_output_parses_events_only() {
-        let event_value = serde_json::json!({
-            "type": "message_stop"
-        });
-        let event: RawMessageStreamEvent = serde_json::from_value(event_value).unwrap();
-        assert_eq!(event.event_type(), "message_stop");
-        // Full messages are not valid stream events; predictors must yield events.
-        let message_value = serde_json::json!({
-            "id": "msg-1",
-            "type": "message",
-            "role": "assistant",
-            "content": [{ "type": "text", "text": "Paris." }],
-            "model": "test-model",
-            "stop_reason": "end_turn",
-            "usage": { "input_tokens": 10, "output_tokens": 5 }
-        });
-        assert!(serde_json::from_value::<RawMessageStreamEvent>(message_value).is_err());
     }
 }

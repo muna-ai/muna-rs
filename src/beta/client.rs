@@ -23,12 +23,12 @@ pub struct BetaClient {
 impl BetaClient {
 
     pub fn new(
-        _: Arc<dyn Client>,
+        client: Arc<dyn Client>,
         predictors: PredictorService,
         predictions: PredictionService,
     ) -> Self {
         let anthropic = AnthropicClient::new(predictors.clone(), predictions.clone());
-        let openai = OpenAIClient::new(predictors, predictions);
+        let openai = OpenAIClient::new(client, predictors, predictions);
         Self { anthropic, openai }
     }
 }

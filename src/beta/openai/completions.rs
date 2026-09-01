@@ -6,21 +6,27 @@
 use std::collections::{BTreeMap, HashMap};
 use std::pin::Pin;
 use std::sync::Arc;
-
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
 use futures_core::Stream;
 use futures_util::StreamExt;
+use serde_json::json;
 use tokio::sync::RwLock;
 
 use crate::beta::utils::get_parameter;
-use crate::client::Result;
+use crate::c;
+use crate::client::{Client, Result};
 use crate::MunaError;
 use crate::services::{PredictionService, PredictorService};
-use crate::types::{Acceleration, Dtype, Parameter, Prediction, Value};
+use crate::types::{self, Acceleration, Dtype, Parameter, Prediction, Value};
 
 use super::schema::{
     ChatCompletion, ChatCompletionChoice, ChatCompletionChunk,
-    ChatCompletionChunkChoice, ChatCompletionCreateParams,
-    ChatCompletionMessage, ChatCompletionUsage,
+    ChatCompletionChunkChoice, ChatCompletionContent,
+    ChatCompletionContentPart, ChatCompletionContentPartInputAudio,
+    ChatCompletionCreateParams, ChatCompletionMessage,
+    ChatCompletionMessageFunctionToolCall, ChatCompletionToolCallFunction,
+    ChatCompletionToolChoice, ChatCompletionUsage,
 };
 
 /// Stream of chat completion chunks.
@@ -37,12 +43,19 @@ struct DelegateInfo {
     top_p_param_name: Option<String>,
     frequency_penalty_param_name: Option<String>,
     presence_penalty_param_name: Option<String>,
+    images_param_name: Option<String>,
+    audios_param_name: Option<String>,
+    /// Declared PCM sample rate of the audios parameter; all decoded
+    /// audio content parts are resampled to it.
+    audio_sample_rate: Option<u32>,
+    tools_param_name: Option<String>,
     completion_param_idx: usize,
 }
 
 /// Create chat completions.
 #[derive(Clone)]
 pub struct ChatCompletionService {
+    client: Arc<dyn Client>,
     predictors: PredictorService,
     predictions: PredictionService,
     cache: Arc<RwLock<HashMap<String, DelegateInfo>>>,
@@ -51,10 +64,12 @@ pub struct ChatCompletionService {
 impl ChatCompletionService {
 
     pub fn new(
+        client: Arc<dyn Client>,
         predictors: PredictorService,
         predictions: PredictionService
     ) -> Self {
         Self {
+            client,
             predictors,
             predictions,
             cache: Arc::new(RwLock::new(HashMap::new())),
@@ -123,12 +138,35 @@ impl ChatCompletionService {
             })?
         };
         let mut input_map = HashMap::new();
-        let messages = params
-            .messages
-            .iter()
-            .map(serde_json::to_value)
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        input_map.insert(info.input_param_name, Value::List(messages));
+        let conversation = normalize_conversation(
+            self.client.as_ref(),
+            &params.messages,
+            &info
+        ).await?;
+        input_map.insert(info.input_param_name, Value::List(conversation.messages));
+        if let (false, Some(name)) = (conversation.images.is_empty(), info.images_param_name) {
+            input_map.insert(name, Value::ImageList(conversation.images));
+        }
+        if let (false, Some(name)) = (conversation.audios.is_empty(), info.audios_param_name) {
+            input_map.insert(name, Value::ArrayList(conversation.audios));
+        }
+        if let Some(tools) = &params.tools {
+            if !tools.is_empty() && params.tool_choice != Some(ChatCompletionToolChoice::None) {
+                let Some(name) = info.tools_param_name else {
+                    return Err(MunaError::InvalidInput(format!(
+                        "{} does not support tool calling because it does not \
+                        declare a tools input parameter.",
+                        params.model
+                    )));
+                };
+                let tools = tools
+                    .iter()
+                    .map(serde_json::to_value)
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(|e| MunaError::Prediction(e.to_string()))?;
+                input_map.insert(name, Value::List(tools));
+            }
+        }
         if let (Some(value), Some(name)) = (params.response_format, info.response_format_param_name)
         {
             input_map.insert(name, Value::Dict(value));
@@ -267,6 +305,28 @@ impl ChatCompletionService {
         )
         .1
         .map(|p| p.name.clone());
+        let images_param_name = get_parameter(
+            &signature.inputs,
+            &[Dtype::ImageList],
+            Some("openai.chat.completions.images"),
+        )
+        .1
+        .map(|p| p.name.clone());
+        let audios_param = get_parameter(
+            &signature.inputs,
+            &[Dtype::ArrayList],
+            Some("openai.chat.completions.audios"),
+        )
+        .1;
+        let audios_param_name = audios_param.map(|p| p.name.clone());
+        let audio_sample_rate = audios_param.and_then(|p| p.sample_rate);
+        let tools_param_name = get_parameter(
+            &signature.inputs,
+            &[Dtype::List],
+            Some("openai.chat.completions.tools"),
+        )
+        .1
+        .map(|p| p.name.clone());
         let completion_param_idx = signature
             .outputs
             .iter()
@@ -295,8 +355,174 @@ impl ChatCompletionService {
             top_p_param_name,
             frequency_penalty_param_name,
             presence_penalty_param_name,
+            images_param_name,
+            audios_param_name,
+            audio_sample_rate,
+            tools_param_name,
             completion_param_idx,
         })
+    }
+}
+
+/// HF-canonical media placeholder emitted in place of a consumed media
+/// part: the nth `image` / `audio` placeholder across the conversation
+/// corresponds to the nth entry of the parallel media input.
+fn media_placeholder(kind: &str) -> serde_json::Value {
+    json!({ "type": kind })
+}
+
+/// Conversation after content-part normalization: messages ready for the
+/// predictor's messages input, plus the parallel media lists their
+/// placeholders index into.
+#[derive(Debug)]
+struct NormalizedConversation {
+    messages: Vec<serde_json::Value>,
+    images: Vec<types::Image>,
+    audios: Vec<types::Tensor>,
+}
+
+/// Normalize content parts across all messages: flatten textual content
+/// to plain strings, decode media parts into parallel lists correlated by
+/// order of appearance, and reject modalities the model does not declare.
+async fn normalize_conversation(
+    client: &dyn Client,
+    messages: &[ChatCompletionMessage],
+    info: &DelegateInfo
+) -> Result<NormalizedConversation> {
+    let mut normalized = Vec::with_capacity(messages.len());
+    let mut images = Vec::new();
+    let mut audios = Vec::new();
+    for message in messages {
+        let content: Option<serde_json::Value> = match &message.content {
+            None => None,
+            Some(content @ ChatCompletionContent::Text(_)) => Some(content.flatten().into()),
+            Some(content @ ChatCompletionContent::Parts(_)) if content.is_text() => {
+                Some(content.flatten().into())
+            }
+            Some(ChatCompletionContent::Parts(source_parts)) => {
+                let mut parts = Vec::with_capacity(source_parts.len());
+                for part in source_parts {
+                    match part {
+                        ChatCompletionContentPart::Text { .. } |
+                        ChatCompletionContentPart::Refusal { .. } => {
+                            parts.push(serde_json::to_value(part)?);
+                        }
+                        ChatCompletionContentPart::ImageUrl { image_url }
+                            if info.images_param_name.is_some() =>
+                        {
+                            images.push(decode_image(client, &image_url.url).await?);
+                            parts.push(media_placeholder("image"));
+                        }
+                        ChatCompletionContentPart::InputAudio { input_audio }
+                            if info.audios_param_name.is_some() =>
+                        {
+                            audios.push(decode_audio(input_audio, info.audio_sample_rate)?);
+                            parts.push(media_placeholder("audio"));
+                        }
+                        ChatCompletionContentPart::ImageUrl { .. } => {
+                            return Err(MunaError::InvalidInput(
+                                "`image_url` content is not supported by this model.".into(),
+                            ));
+                        }
+                        ChatCompletionContentPart::InputAudio { .. } => {
+                            return Err(MunaError::InvalidInput(
+                                "`input_audio` content is not supported by this model.".into(),
+                            ));
+                        }
+                        ChatCompletionContentPart::File { .. } => {
+                            return Err(MunaError::InvalidInput(
+                                "File content parts are not yet supported.".into(),
+                            ));
+                        }
+                    }
+                }
+                Some(serde_json::Value::Array(parts))
+            }
+        };
+        let mut value = json!({ "role": message.role, "content": content });
+        if let Some(reasoning) = &message.reasoning_content {
+            value["reasoning_content"] = reasoning.clone().into();
+        }
+        if let Some(tool_calls) = &message.tool_calls {
+            value["tool_calls"] = serde_json::to_value(tool_calls)
+                .map_err(|e| MunaError::Prediction(e.to_string()))?;
+        }
+        if let Some(tool_call_id) = &message.tool_call_id {
+            value["tool_call_id"] = tool_call_id.clone().into();
+        }
+        normalized.push(value);
+    }
+    Ok(NormalizedConversation {
+        messages: normalized,
+        images,
+        audios,
+    })
+}
+
+/// Maximum size of a remotely-fetched image.
+const MAX_IMAGE_FETCH_BYTES: usize = 20 * 1024 * 1024;
+
+/// Decode an image content part URL (base64 data URL or remote URL) into
+/// a decoded pixel buffer.
+async fn decode_image(
+    client: &dyn Client,
+    url: &str
+) -> Result<types::Image> {
+    let (data, mime) = if let Some(rest) = url.strip_prefix("data:") {
+        let (meta, payload) = rest.split_once(',').ok_or_else(|| {
+            MunaError::InvalidInput("Malformed data URL in `image_url` content part.".into())
+        })?;
+        let mime = meta
+            .split(';')
+            .next()
+            .filter(|m| !m.is_empty())
+            .unwrap_or("image/*")
+            .to_string();
+        let data = BASE64.decode(payload).map_err(|e| {
+            MunaError::InvalidInput(format!("Failed to decode image data URL: {e}"))
+        })?;
+        (data, mime)
+    } else {
+        let data = client.fetch(url).await.map_err(|e| {
+            MunaError::InvalidInput(format!("Failed to fetch image at {url}: {e}"))
+        })?;
+        if data.len() > MAX_IMAGE_FETCH_BYTES {
+            return Err(MunaError::InvalidInput(format!(
+                "Image at {url} exceeds the maximum size of {MAX_IMAGE_FETCH_BYTES} bytes."
+            )));
+        }
+        (data, "image/*".to_string())
+    };
+    let value = c::Value::from_bytes(&data, &mime)?;
+    match value.to_object()? {
+        types::Value::Image(image) => Ok(image),
+        _ => Err(MunaError::InvalidInput(
+            "Failed to decode `image_url` content part into an image.".into(),
+        )),
+    }
+}
+
+/// Decode an audio content part into linear PCM samples at the model's
+/// declared sample rate via the Function C library.
+fn decode_audio(
+    input_audio: &ChatCompletionContentPartInputAudio,
+    sample_rate: Option<u32>
+) -> Result<types::Tensor> {
+    let sample_rate = sample_rate.ok_or_else(|| {
+        MunaError::Prediction(
+            "Model does not declare a sample rate for its audio input.".into(),
+        )
+    })?;
+    let data = BASE64.decode(&input_audio.data).map_err(|e| {
+        MunaError::InvalidInput(format!("Failed to decode audio data: {e}"))
+    })?;
+    let mime = format!("audio/{};rate={sample_rate}", input_audio.format.as_str());
+    let value = c::Value::from_bytes(&data, &mime)?;
+    match value.to_object()? {
+        types::Value::Tensor(tensor) => Ok(tensor),
+        _ => Err(MunaError::InvalidInput(
+            "Failed to decode `input_audio` content part into PCM samples.".into(),
+        )),
     }
 }
 
@@ -421,12 +647,52 @@ fn create_completion_choice(
         index,
         message: ChatCompletionMessage {
             role,
-            content: Some(content),
+            content: Some(ChatCompletionContent::Text(content)),
             reasoning_content: (!reasoning_content.is_empty()).then_some(reasoning_content),
+            tool_calls: merge_tool_calls(&choices),
+            tool_call_id: None,
         },
         finish_reason,
         logprobs: None,
     }
+}
+
+/// Accumulate streamed tool call fragments into completed tool calls,
+/// keyed by fragment index: the first fragment carries the id and
+/// function name; subsequent fragments append argument text.
+fn merge_tool_calls(
+    choices: &[ChatCompletionChunkChoice]
+) -> Option<Vec<ChatCompletionMessageFunctionToolCall>> {
+    let mut calls: BTreeMap<usize, ChatCompletionMessageFunctionToolCall> = BTreeMap::new();
+    for choice in choices {
+        let Some(fragments) = choice.delta.as_ref().and_then(|d| d.tool_calls.as_ref()) else {
+            continue;
+        };
+        for fragment in fragments {
+            let call = calls.entry(fragment.index).or_insert_with(|| {
+                ChatCompletionMessageFunctionToolCall {
+                    id: String::new(),
+                    r#type: "function".to_string(),
+                    function: ChatCompletionToolCallFunction {
+                        name: String::new(),
+                        arguments: String::new(),
+                    },
+                }
+            });
+            if let Some(id) = &fragment.id {
+                call.id = id.clone();
+            }
+            if let Some(function) = &fragment.function {
+                if let Some(name) = &function.name {
+                    call.function.name = name.clone();
+                }
+                if let Some(arguments) = &function.arguments {
+                    call.function.arguments.push_str(arguments);
+                }
+            }
+        }
+    }
+    (!calls.is_empty()).then(|| calls.into_values().collect())
 }
 
 fn object_kind(output: &serde_json::Map<String, serde_json::Value>) -> Option<&str> {
@@ -473,6 +739,7 @@ mod tests {
                     role: Some("assistant".to_string()),
                     content: None,
                     reasoning_content: Some("Let me ".to_string()),
+                    tool_calls: None,
                 },
                 None,
             ),
@@ -481,6 +748,7 @@ mod tests {
                     role: None,
                     content: None,
                     reasoning_content: Some("think.".to_string()),
+                    tool_calls: None,
                 },
                 None,
             ),
@@ -489,6 +757,7 @@ mod tests {
                     role: None,
                     content: Some("Paris.".to_string()),
                     reasoning_content: None,
+                    tool_calls: None,
                 },
                 Some(ChatCompletionUsage {
                     prompt_tokens: 10,
@@ -503,11 +772,208 @@ mod tests {
         ];
         let completion = merge_chunks(chunks).unwrap();
         let message = &completion.choices[0].message;
-        assert_eq!(message.content.as_deref(), Some("Paris."));
+        assert_eq!(message.content.as_ref().map(|c| c.flatten()), Some("Paris.".to_string()));
         assert_eq!(message.reasoning_content.as_deref(), Some("Let me think."));
         let usage = completion.usage.unwrap();
         let details = usage.completion_tokens_details.unwrap();
         assert_eq!(details.reasoning_tokens, Some(3));
+    }
+
+    /// Real client for normalization tests; never touches the network
+    /// because the tests only use data URLs.
+    fn test_client() -> crate::client::MunaClient {
+        crate::client::MunaClient::new(None, None)
+    }
+
+    fn delegate_info(images: bool) -> DelegateInfo {
+        DelegateInfo {
+            input_param_name: "messages".to_string(),
+            response_format_param_name: None,
+            reasoning_effort_param_name: None,
+            max_output_tokens_param_name: None,
+            temperature_param_name: None,
+            top_p_param_name: None,
+            frequency_penalty_param_name: None,
+            presence_penalty_param_name: None,
+            images_param_name: images.then(|| "images".to_string()),
+            audios_param_name: None,
+            audio_sample_rate: None,
+            tools_param_name: None,
+            completion_param_idx: 0,
+        }
+    }
+
+    /// 2x2 solid-red RGBA PNG.
+    const RED_PNG_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFUlEQVR4nGP8z8Dwn4GBgYEJRIAwAB8XAgICR7MUAAAAAElFTkSuQmCC";
+
+    #[test]
+    fn content_deserializes_from_string_and_parts() {
+        let message: ChatCompletionMessage = serde_json::from_value(json!({
+            "role": "user",
+            "content": "What is the capital of France?",
+        })).unwrap();
+        assert!(matches!(message.content, Some(ChatCompletionContent::Text(_))));
+        // OpenCode-shaped body: content as an array of text parts.
+        let message: ChatCompletionMessage = serde_json::from_value(json!({
+            "role": "user",
+            "content": [{ "type": "text", "text": "What is the capital of France?" }],
+        })).unwrap();
+        let Some(ChatCompletionContent::Parts(parts)) = &message.content else {
+            panic!("expected parts content");
+        };
+        assert!(matches!(&parts[0], ChatCompletionContentPart::Text { text } if text == "What is the capital of France?"));
+        // Text serializes back as a bare string (untagged).
+        let text = ChatCompletionContent::Text("Paris.".to_string());
+        assert_eq!(serde_json::to_value(&text).unwrap(), json!("Paris."));
+    }
+
+    #[test]
+    fn content_flatten_joins_text_parts() {
+        let content: ChatCompletionContent = serde_json::from_value(json!([
+            { "type": "text", "text": "line one" },
+            { "type": "text", "text": "line two" },
+            { "type": "refusal", "refusal": "I cannot help with that." },
+        ])).unwrap();
+        assert!(content.is_text());
+        assert_eq!(content.flatten(), "line one\nline two\nI cannot help with that.");
+        let mixed: ChatCompletionContent = serde_json::from_value(json!([
+            { "type": "text", "text": "describe this" },
+            { "type": "image_url", "image_url": { "url": "https://example.com/cat.png" } },
+        ])).unwrap();
+        assert!(!mixed.is_text());
+    }
+
+    #[tokio::test]
+    async fn normalize_flattens_text_and_passes_strings_through() {
+        let messages: Vec<ChatCompletionMessage> = serde_json::from_value(json!([
+            { "role": "system", "content": "You are a helpful assistant." },
+            { "role": "user", "content": [
+                { "type": "text", "text": "line one" },
+                { "type": "text", "text": "line two" },
+            ] },
+        ])).unwrap();
+        let conversation = normalize_conversation(
+            &test_client(),
+            &messages,
+            &delegate_info(false)
+        ).await.unwrap();
+        assert_eq!(conversation.messages[0]["content"], json!("You are a helpful assistant."));
+        assert_eq!(conversation.messages[1]["content"], json!("line one\nline two"));
+        assert!(conversation.images.is_empty());
+        assert!(conversation.audios.is_empty());
+    }
+
+    #[tokio::test]
+    async fn normalize_decodes_image_parts_into_placeholders() {
+        let messages: Vec<ChatCompletionMessage> = serde_json::from_value(json!([
+            { "role": "user", "content": [
+                { "type": "text", "text": "describe this" },
+                { "type": "image_url", "image_url": {
+                    "url": format!("data:image/png;base64,{RED_PNG_B64}"),
+                } },
+            ] },
+        ])).unwrap();
+        let conversation = normalize_conversation(
+            &test_client(),
+            &messages,
+            &delegate_info(true)
+        ).await.unwrap();
+        assert_eq!(conversation.images.len(), 1);
+        assert!(conversation.audios.is_empty());
+        assert_eq!(
+            conversation.messages[0]["content"],
+            json!([
+                { "type": "text", "text": "describe this" },
+                { "type": "image" },
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn normalize_rejects_undeclared_and_file_modalities() {
+        let messages: Vec<ChatCompletionMessage> = serde_json::from_value(json!([
+            { "role": "user", "content": [
+                { "type": "image_url", "image_url": { "url": "data:image/png;base64,AAAA" } },
+            ] },
+        ])).unwrap();
+        let error = normalize_conversation(
+            &test_client(),
+            &messages,
+            &delegate_info(false)
+        ).await.unwrap_err();
+        assert!(matches!(&error, MunaError::InvalidInput(m) if m.contains("image_url")));
+        let messages: Vec<ChatCompletionMessage> = serde_json::from_value(json!([
+            { "role": "user", "content": [
+                { "type": "file", "file": { "file_data": "AAAA", "filename": "doc.pdf" } },
+            ] },
+        ])).unwrap();
+        let error = normalize_conversation(
+            &test_client(),
+            &messages,
+            &delegate_info(true)
+        ).await.unwrap_err();
+        assert!(matches!(&error, MunaError::InvalidInput(m) if m.contains("File content parts")));
+    }
+
+    #[test]
+    fn merge_accumulates_tool_call_fragments() {
+        // Fragments arrive as: id + name, then two argument fragments.
+        let deltas: Vec<ChatCompletionDelta> = vec![
+            serde_json::from_value(json!({
+                "role": "assistant",
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "call_test_0",
+                    "type": "function",
+                    "function": { "name": "get_weather", "arguments": "" },
+                }],
+            })).unwrap(),
+            serde_json::from_value(json!({
+                "tool_calls": [{
+                    "index": 0,
+                    "function": { "arguments": "{\"location\": " },
+                }],
+            })).unwrap(),
+            serde_json::from_value(json!({
+                "tool_calls": [{
+                    "index": 0,
+                    "function": { "arguments": "\"Paris\"}" },
+                }],
+            })).unwrap(),
+        ];
+        let chunks: Vec<ChatCompletionChunk> = deltas
+            .into_iter()
+            .map(|delta| chunk(delta, None))
+            .collect();
+        let completion = merge_chunks(chunks).unwrap();
+        let calls = completion.choices[0].message.tool_calls.as_ref().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "call_test_0");
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(calls[0].function.arguments, "{\"location\": \"Paris\"}");
+    }
+
+    #[tokio::test]
+    async fn normalize_passes_tool_turns_through() {
+        let messages: Vec<ChatCompletionMessage> = serde_json::from_value(json!([
+            { "role": "assistant", "content": null, "tool_calls": [{
+                "id": "call_123",
+                "type": "function",
+                "function": { "name": "get_weather", "arguments": "{\"city\": \"Paris\"}" },
+            }] },
+            { "role": "tool", "content": "18C and sunny", "tool_call_id": "call_123" },
+        ])).unwrap();
+        let conversation = normalize_conversation(
+            &test_client(),
+            &messages,
+            &delegate_info(false)
+        ).await.unwrap();
+        assert_eq!(
+            conversation.messages[0]["tool_calls"][0]["function"]["name"],
+            json!("get_weather")
+        );
+        assert_eq!(conversation.messages[1]["role"], json!("tool"));
+        assert_eq!(conversation.messages[1]["tool_call_id"], json!("call_123"));
     }
 
     #[test]
@@ -517,6 +983,7 @@ mod tests {
                 role: Some("assistant".to_string()),
                 content: Some("Hello.".to_string()),
                 reasoning_content: None,
+                tool_calls: None,
             },
             None,
         )];
