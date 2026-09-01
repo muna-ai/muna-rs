@@ -1,3 +1,6 @@
+## 0.0.19
+*INCOMPLETE*
+
 ## 0.0.18
 + Added support for tool calling in the OpenAI-compatible client.
 + Added support for tool calling in the Anthropic-compatible client.
