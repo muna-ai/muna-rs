@@ -257,28 +257,40 @@ pub struct MessageParam {
 }
 
 /// Parameters for creating a message.
-#[derive(Debug, Clone, Default)]
+///
+/// Deserializes from an Anthropic messages request body (unknown fields
+/// such as `stream` are ignored) so servers and the control plane share
+/// one wire shape.
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct MessageCreateParams {
     /// Model predictor tag.
     pub model: String,
     /// The maximum number of tokens to generate before stopping.
     pub max_tokens: i32,
     /// Input messages.
+    #[serde(default)]
     pub messages: Vec<MessageParam>,
     /// Custom text sequences that will cause the model to stop generating.
     /// Ignored unless the predictor declares support for it.
+    #[serde(default)]
     pub stop_sequences: Option<Vec<String>>,
     /// Tools the model may call.
+    #[serde(default)]
     pub tools: Option<Vec<Tool>>,
     /// System prompt.
+    #[serde(default)]
     pub system: Option<MessageContent>,
     /// Amount of randomness injected into the response.
+    #[serde(default)]
     pub temperature: Option<f32>,
     /// Only sample from the top K options for each subsequent token.
     /// Ignored unless the predictor declares support for it.
+    #[serde(default)]
     pub top_k: Option<i32>,
     /// Nucleus sampling coefficient.
+    #[serde(default)]
     pub top_p: Option<f32>,
-    /// Prediction acceleration.
+    /// Prediction acceleration. Not a wire field.
+    #[serde(skip)]
     pub acceleration: Option<Acceleration>,
 }

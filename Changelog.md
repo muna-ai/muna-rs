@@ -1,5 +1,5 @@
 ## 0.0.19
-*INCOMPLETE*
++ Minor updates.
 
 ## 0.0.18
 + Added support for tool calling in the OpenAI-compatible client.

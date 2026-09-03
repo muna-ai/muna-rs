@@ -11,12 +11,11 @@ use futures_core::Stream;
 use futures_util::StreamExt;
 use tokio::sync::RwLock;
 
-use crate::beta::openai::ChatCompletionChunk;
-use crate::beta::utils::get_parameter;
+use crate::beta::openai::{bind_chat_inputs, ChatCompletionChunk, ChatInputs};
 use crate::client::Result;
 use crate::MunaError;
 use crate::services::{PredictionService, PredictorService};
-use crate::types::{Acceleration, Dtype, Parameter, Prediction, Value};
+use crate::types::{Acceleration, Dtype, Prediction, Signature, Value};
 
 use super::schema::{
     ContentBlock, ContentBlockDelta, ContentBlockParam, Message,
@@ -36,16 +35,10 @@ type ChunkStream = Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk>> + Send
 /// Cached predictor metadata for fast message creation. Chat predictors
 /// always speak the OpenAI chat completions contract; this surface is a
 /// pure adapter that translates Anthropic requests and responses to and
-/// from it.
+/// from it. Inputs bind against `signature` through `bind_chat_inputs`.
 #[derive(Clone)]
 struct DelegateInfo {
-    input_param_name: String,
-    max_tokens_param_name: Option<String>,
-    stop_sequences_param_name: Option<String>,
-    temperature_param_name: Option<String>,
-    top_k_param_name: Option<String>,
-    top_p_param_name: Option<String>,
-    tools_param_name: Option<String>,
+    signature: Signature,
     output_param_idx: usize,
 }
 
@@ -119,51 +112,7 @@ impl MessageService {
                 ))
             })?
         };
-        // Build the OpenAI-shaped message list, folding the system prompt
-        // into the messages. Predictors that need the system prompt
-        // separately can filter it out.
-        let mut messages = Vec::new();
-        if let Some(system) = &params.system {
-            messages.push(serde_json::json!({
-                "role": "system",
-                "content": system.flatten(),
-            }));
-        }
-        for message in &params.messages {
-            translate_message_for_openai(message, &mut messages);
-        }
-        let mut input_map = HashMap::new();
-        input_map.insert(info.input_param_name, Value::List(messages));
-        if let Some(name) = info.max_tokens_param_name {
-            input_map.insert(name, Value::Int(params.max_tokens));
-        }
-        if let (Some(value), Some(name)) = (params.stop_sequences, info.stop_sequences_param_name)
-        {
-            let sequences = value.into_iter().map(serde_json::Value::String).collect();
-            input_map.insert(name, Value::List(sequences));
-        }
-        if let (Some(value), Some(name)) = (params.temperature, info.temperature_param_name) {
-            input_map.insert(name, Value::Float(value));
-        }
-        if let (Some(value), Some(name)) = (params.top_k, info.top_k_param_name) {
-            input_map.insert(name, Value::Int(value));
-        }
-        if let (Some(value), Some(name)) = (params.top_p, info.top_p_param_name) {
-            input_map.insert(name, Value::Float(value));
-        }
-        if let Some(tools) = &params.tools {
-            if !tools.is_empty() {
-                let Some(name) = info.tools_param_name else {
-                    return Err(MunaError::InvalidInput(format!(
-                        "{} does not support tool calling because it does not \
-                        declare a tools input parameter.",
-                        params.model
-                    )));
-                };
-                let tools = tools.iter().map(openai_tool).collect();
-                input_map.insert(name, Value::List(tools));
-            }
-        }
+        let input_map = bind_chat_inputs(params.chat_inputs(), &info.signature)?;
         let acceleration = params.acceleration.unwrap_or(Acceleration::LocalAuto);
         Ok((input_map, info.output_param_idx, acceleration))
     }
@@ -193,81 +142,6 @@ impl MessageService {
             ))
         })?;
         let signature = &predictor.signature;
-        let required_inputs: Vec<&Parameter> = signature
-            .inputs
-            .iter()
-            .filter(|p| !p.optional.unwrap_or(false))
-            .collect();
-        if required_inputs.len() != 1 {
-            return Err(MunaError::Prediction(format!(
-                "{tag} cannot be used with Anthropic messages API because \
-                it has more than one required input parameter."
-            )));
-        }
-        let input_param = required_inputs[0];
-        if input_param.dtype != Some(Dtype::List) {
-            return Err(MunaError::Prediction(format!(
-                "{tag} cannot be used with Anthropic messages API because \
-                it does not have a valid chat messages input parameter."
-            )));
-        }
-        let float_dtypes = [Dtype::Float32, Dtype::Float64];
-        let int_dtypes = [
-            Dtype::Int8,
-            Dtype::Int16,
-            Dtype::Int32,
-            Dtype::Int64,
-            Dtype::Uint8,
-            Dtype::Uint16,
-            Dtype::Uint32,
-            Dtype::Uint64,
-        ];
-        let max_tokens_param_name = get_parameter(
-            &signature.inputs,
-            &int_dtypes,
-            Some("openai.chat.completions.max_output_tokens"),
-        )
-        .1
-        .map(|p| p.name.clone());
-        let temperature_param_name = get_parameter(
-            &signature.inputs,
-            &float_dtypes,
-            Some("openai.chat.completions.temperature"),
-        )
-        .1
-        .map(|p| p.name.clone());
-        let top_p_param_name = get_parameter(
-            &signature.inputs,
-            &float_dtypes,
-            Some("openai.chat.completions.top_p"),
-        )
-        .1
-        .map(|p| p.name.clone());
-        // Anthropic-specific knobs (stop sequences, top-k) keep their own
-        // denotations: parameter denotations describe input meaning and are
-        // orthogonal to the output contract, so an OpenAI-shaped predictor
-        // can declare them for this surface.
-        let stop_sequences_param_name = get_parameter(
-            &signature.inputs,
-            &[Dtype::List],
-            Some("anthropic.messages.stop_sequences"),
-        )
-        .1
-        .map(|p| p.name.clone());
-        let top_k_param_name = get_parameter(
-            &signature.inputs,
-            &int_dtypes,
-            Some("anthropic.messages.top_k"),
-        )
-        .1
-        .map(|p| p.name.clone());
-        let tools_param_name = get_parameter(
-            &signature.inputs,
-            &[Dtype::List],
-            Some("openai.chat.completions.tools"),
-        )
-        .1
-        .map(|p| p.name.clone());
         let output_param_idx = signature
             .outputs
             .iter()
@@ -288,16 +162,69 @@ impl MessageService {
                 ))
             })?;
         Ok(DelegateInfo {
-            input_param_name: input_param.name.clone(),
-            max_tokens_param_name,
-            stop_sequences_param_name,
-            temperature_param_name,
-            top_k_param_name,
-            top_p_param_name,
-            tools_param_name,
+            signature: signature.clone(),
             output_param_idx,
         })
     }
+}
+
+impl MessageCreateParams {
+
+    /// Inputs the chat predictor receives for this request: the system
+    /// prompt folded into OpenAI-shaped messages, tools translated to
+    /// OpenAI function tools (`None` when absent or empty), and sampling
+    /// knobs under their shared denotations (`max_tokens` is the
+    /// `max_output_tokens` knob). Anthropic-specific knobs (stop sequences,
+    /// top-k) keep their own denotations: denotations describe input meaning
+    /// and are orthogonal to the output contract, so an OpenAI-shaped
+    /// predictor can declare them for this surface. Chat predictors speak
+    /// the OpenAI contract, so this is the whole Anthropic adaptation of the
+    /// request; servers and the control plane's router-hash path both call it.
+    pub fn chat_inputs(&self) -> ChatInputs {
+        ChatInputs {
+            messages: to_openai_messages(self.system.as_ref(), &self.messages),
+            tools: self
+                .tools
+                .as_deref()
+                .filter(|tools| !tools.is_empty())
+                .map(to_openai_tools),
+            response_format: None,
+            reasoning_effort: None,
+            max_output_tokens: Some(self.max_tokens),
+            temperature: self.temperature,
+            top_p: self.top_p,
+            frequency_penalty: None,
+            presence_penalty: None,
+            stop_sequences: self.stop_sequences.clone(),
+            top_k: self.top_k,
+        }
+    }
+}
+
+/// Anthropic request -> OpenAI-shaped messages, exactly as the chat
+/// predictor receives them. The system prompt is folded in as a leading
+/// `system` message (predictors that need it separately can filter it out).
+fn to_openai_messages(
+    system: Option<&MessageContent>,
+    messages: &[MessageParam]
+) -> Vec<serde_json::Value> {
+    let mut result = Vec::with_capacity(messages.len() + usize::from(system.is_some()));
+    if let Some(system) = system {
+        result.push(serde_json::json!({
+            "role": "system",
+            "content": system.flatten(),
+        }));
+    }
+    for message in messages {
+        translate_message_for_openai(message, &mut result);
+    }
+    result
+}
+
+/// Anthropic tool definitions -> OpenAI function tools, exactly as the chat
+/// predictor's tools input receives them.
+fn to_openai_tools(tools: &[Tool]) -> Vec<serde_json::Value> {
+    tools.iter().map(openai_tool).collect()
 }
 
 /// Convert an Anthropic tool definition into the OpenAI function tool
@@ -879,10 +806,11 @@ mod tests {
                   "content": "18C and sunny" },
             ],
         })).unwrap();
-        let mut messages = Vec::new();
-        translate_message_for_openai(&assistant, &mut messages);
-        translate_message_for_openai(&user, &mut messages);
-        assert_eq!(messages.len(), 3);
+        let system = MessageContent::Text("You are a weather bot.".to_string());
+        let messages = to_openai_messages(Some(&system), &[assistant, user]);
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[0], serde_json::json!({ "role": "system", "content": "You are a weather bot." }));
+        let messages = &messages[1..];
         assert_eq!(messages[0]["role"], "assistant");
         assert_eq!(messages[0]["content"], "Checking the weather.");
         assert_eq!(messages[1]["tool_calls"][0]["id"], "call_123");
@@ -893,6 +821,60 @@ mod tests {
         assert_eq!(messages[2]["role"], "tool");
         assert_eq!(messages[2]["tool_call_id"], "call_123");
         assert_eq!(messages[2]["content"], "18C and sunny");
+    }
+
+    #[test]
+    fn chat_inputs_fold_system_and_translate_tools() {
+        let params: MessageCreateParams = serde_json::from_value(serde_json::json!({
+            "model": "@a/x",
+            "max_tokens": 64,
+            "stream": true,
+            "system": [{ "type": "text", "text": "be brief" }],
+            "messages": [{ "role": "user", "content": "weather in Paris?" }],
+            "tools": [{
+                "name": "get_weather",
+                "description": "Weather lookup",
+                "input_schema": { "type": "object" },
+            }],
+            "stop_sequences": ["END"],
+            "top_k": 40,
+            "temperature": 0.5,
+        })).unwrap();
+        let inputs = params.chat_inputs();
+        // `max_tokens` is the shared `max_output_tokens` knob; Anthropic-only
+        // knobs ride through; OpenAI-only knobs stay unset.
+        assert_eq!(inputs.max_output_tokens, Some(64));
+        assert_eq!(inputs.stop_sequences, Some(vec!["END".to_string()]));
+        assert_eq!(inputs.top_k, Some(40));
+        assert_eq!(inputs.temperature, Some(0.5));
+        assert_eq!(inputs.top_p, None);
+        assert_eq!(inputs.reasoning_effort, None);
+        assert_eq!(inputs.response_format, None);
+        assert_eq!(
+            inputs.messages,
+            vec![
+                serde_json::json!({ "role": "system", "content": "be brief" }),
+                serde_json::json!({ "role": "user", "content": "weather in Paris?" }),
+            ]
+        );
+        assert_eq!(
+            inputs.tools,
+            Some(vec![serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Weather lookup",
+                    "parameters": { "type": "object" },
+                },
+            })])
+        );
+        let params: MessageCreateParams = serde_json::from_value(serde_json::json!({
+            "model": "@a/x",
+            "max_tokens": 64,
+            "messages": [],
+            "tools": [],
+        })).unwrap();
+        assert_eq!(params.chat_inputs().tools, None);
     }
 
     #[test]

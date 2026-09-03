@@ -18,37 +18,32 @@ use crate::c;
 use crate::client::{Client, Result};
 use crate::MunaError;
 use crate::services::{PredictionService, PredictorService};
-use crate::types::{self, Acceleration, Dtype, Parameter, Prediction, Value};
+use crate::types::{self, Acceleration, Dtype, Prediction, Signature, Value};
 
+use super::inputs::{bind_chat_inputs, ChatInputs};
 use super::schema::{
     ChatCompletion, ChatCompletionChoice, ChatCompletionChunk,
     ChatCompletionChunkChoice, ChatCompletionContent,
     ChatCompletionContentPart, ChatCompletionContentPartInputAudio,
     ChatCompletionCreateParams, ChatCompletionMessage,
     ChatCompletionMessageFunctionToolCall, ChatCompletionToolCallFunction,
-    ChatCompletionToolChoice, ChatCompletionUsage,
+    ChatCompletionUsage,
 };
 
 /// Stream of chat completion chunks.
 pub type ChatCompletionStream = Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk>> + Send>>;
 
-/// Cached predictor metadata for fast chat completion creation.
+/// Cached predictor metadata for fast chat completion creation. Chat
+/// inputs bind against `signature` through `bind_chat_inputs`; only the
+/// media inputs (which need client-side decoding) are resolved here.
 #[derive(Clone)]
 struct DelegateInfo {
-    input_param_name: String,
-    response_format_param_name: Option<String>,
-    reasoning_effort_param_name: Option<String>,
-    max_output_tokens_param_name: Option<String>,
-    temperature_param_name: Option<String>,
-    top_p_param_name: Option<String>,
-    frequency_penalty_param_name: Option<String>,
-    presence_penalty_param_name: Option<String>,
+    signature: Signature,
     images_param_name: Option<String>,
     audios_param_name: Option<String>,
     /// Declared PCM sample rate of the audios parameter; all decoded
     /// audio content parts are resampled to it.
     audio_sample_rate: Option<u32>,
-    tools_param_name: Option<String>,
     completion_param_idx: usize,
 }
 
@@ -137,66 +132,13 @@ impl ChatCompletionService {
                 ))
             })?
         };
-        let mut input_map = HashMap::new();
-        let conversation = normalize_conversation(
-            self.client.as_ref(),
-            &params.messages,
-            &info
-        ).await?;
-        input_map.insert(info.input_param_name, Value::List(conversation.messages));
-        if let (false, Some(name)) = (conversation.images.is_empty(), info.images_param_name) {
-            input_map.insert(name, Value::ImageList(conversation.images));
+        let media = decode_media(self.client.as_ref(), &params.messages, &info).await?;
+        let mut input_map = bind_chat_inputs(params.chat_inputs()?, &info.signature)?;
+        if let (false, Some(name)) = (media.images.is_empty(), info.images_param_name) {
+            input_map.insert(name, Value::ImageList(media.images));
         }
-        if let (false, Some(name)) = (conversation.audios.is_empty(), info.audios_param_name) {
-            input_map.insert(name, Value::ArrayList(conversation.audios));
-        }
-        if let Some(tools) = &params.tools {
-            if !tools.is_empty() && params.tool_choice != Some(ChatCompletionToolChoice::None) {
-                let Some(name) = info.tools_param_name else {
-                    return Err(MunaError::InvalidInput(format!(
-                        "{} does not support tool calling because it does not \
-                        declare a tools input parameter.",
-                        params.model
-                    )));
-                };
-                let tools = tools
-                    .iter()
-                    .map(serde_json::to_value)
-                    .collect::<std::result::Result<Vec<_>, _>>()
-                    .map_err(|e| MunaError::Prediction(e.to_string()))?;
-                input_map.insert(name, Value::List(tools));
-            }
-        }
-        if let (Some(value), Some(name)) = (params.response_format, info.response_format_param_name)
-        {
-            input_map.insert(name, Value::Dict(value));
-        }
-        if let (Some(value), Some(name)) =
-            (params.reasoning_effort, info.reasoning_effort_param_name)
-        {
-            input_map.insert(name, Value::String(value.as_str().to_string()));
-        }
-        if let (Some(value), Some(name)) = (
-            params.max_completion_tokens,
-            info.max_output_tokens_param_name,
-        ) {
-            input_map.insert(name, Value::Int(value));
-        }
-        if let (Some(value), Some(name)) = (params.temperature, info.temperature_param_name) {
-            input_map.insert(name, Value::Float(value));
-        }
-        if let (Some(value), Some(name)) = (params.top_p, info.top_p_param_name) {
-            input_map.insert(name, Value::Float(value));
-        }
-        if let (Some(value), Some(name)) =
-            (params.frequency_penalty, info.frequency_penalty_param_name)
-        {
-            input_map.insert(name, Value::Float(value));
-        }
-        if let (Some(value), Some(name)) =
-            (params.presence_penalty, info.presence_penalty_param_name)
-        {
-            input_map.insert(name, Value::Float(value));
+        if let (false, Some(name)) = (media.audios.is_empty(), info.audios_param_name) {
+            input_map.insert(name, Value::ArrayList(media.audios));
         }
         let acceleration = params.acceleration.unwrap_or(Acceleration::LocalAuto);
         Ok((input_map, info.completion_param_idx, acceleration))
@@ -227,84 +169,6 @@ impl ChatCompletionService {
             ))
         })?;
         let signature = &predictor.signature;
-        let required_inputs: Vec<&Parameter> = signature
-            .inputs
-            .iter()
-            .filter(|p| !p.optional.unwrap_or(false))
-            .collect();
-        if required_inputs.len() != 1 {
-            return Err(MunaError::Prediction(format!(
-                "{tag} cannot be used with OpenAI chat completions API because \
-                it has more than one required input parameter."
-            )));
-        }
-        let input_param = required_inputs[0];
-        if input_param.dtype != Some(Dtype::List) {
-            return Err(MunaError::Prediction(format!(
-                "{tag} cannot be used with OpenAI chat completions API because \
-                it does not have a valid chat messages input parameter."
-            )));
-        }
-        let float_dtypes = [Dtype::Float32, Dtype::Float64];
-        let int_dtypes = [
-            Dtype::Int8,
-            Dtype::Int16,
-            Dtype::Int32,
-            Dtype::Int64,
-            Dtype::Uint8,
-            Dtype::Uint16,
-            Dtype::Uint32,
-            Dtype::Uint64,
-        ];
-        let response_format_param_name = get_parameter(
-            &signature.inputs,
-            &[Dtype::Dict],
-            Some("openai.chat.completions.response_format"),
-        )
-        .1
-        .map(|p| p.name.clone());
-        let reasoning_effort_param_name = get_parameter(
-            &signature.inputs,
-            &[Dtype::String],
-            Some("openai.chat.completions.reasoning_effort"),
-        )
-        .1
-        .map(|p| p.name.clone());
-        let max_output_tokens_param_name = get_parameter(
-            &signature.inputs,
-            &int_dtypes,
-            Some("openai.chat.completions.max_output_tokens"),
-        )
-        .1
-        .map(|p| p.name.clone());
-        let temperature_param_name = get_parameter(
-            &signature.inputs,
-            &float_dtypes,
-            Some("openai.chat.completions.temperature"),
-        )
-        .1
-        .map(|p| p.name.clone());
-        let top_p_param_name = get_parameter(
-            &signature.inputs,
-            &float_dtypes,
-            Some("openai.chat.completions.top_p"),
-        )
-        .1
-        .map(|p| p.name.clone());
-        let frequency_penalty_param_name = get_parameter(
-            &signature.inputs,
-            &float_dtypes,
-            Some("openai.chat.completions.frequency_penalty"),
-        )
-        .1
-        .map(|p| p.name.clone());
-        let presence_penalty_param_name = get_parameter(
-            &signature.inputs,
-            &float_dtypes,
-            Some("openai.chat.completions.presence_penalty"),
-        )
-        .1
-        .map(|p| p.name.clone());
         let images_param_name = get_parameter(
             &signature.inputs,
             &[Dtype::ImageList],
@@ -320,13 +184,6 @@ impl ChatCompletionService {
         .1;
         let audios_param_name = audios_param.map(|p| p.name.clone());
         let audio_sample_rate = audios_param.and_then(|p| p.sample_rate);
-        let tools_param_name = get_parameter(
-            &signature.inputs,
-            &[Dtype::List],
-            Some("openai.chat.completions.tools"),
-        )
-        .1
-        .map(|p| p.name.clone());
         let completion_param_idx = signature
             .outputs
             .iter()
@@ -347,116 +204,138 @@ impl ChatCompletionService {
                 ))
             })?;
         Ok(DelegateInfo {
-            input_param_name: input_param.name.clone(),
-            response_format_param_name,
-            reasoning_effort_param_name,
-            max_output_tokens_param_name,
-            temperature_param_name,
-            top_p_param_name,
-            frequency_penalty_param_name,
-            presence_penalty_param_name,
+            signature: signature.clone(),
             images_param_name,
             audios_param_name,
             audio_sample_rate,
-            tools_param_name,
             completion_param_idx,
         })
     }
 }
 
-/// HF-canonical media placeholder emitted in place of a consumed media
-/// part: the nth `image` / `audio` placeholder across the conversation
-/// corresponds to the nth entry of the parallel media input.
-fn media_placeholder(kind: &str) -> serde_json::Value {
-    json!({ "type": kind })
+impl ChatCompletionCreateParams {
+
+    /// Inputs the chat predictor receives for this request. `tool_choice` is
+    /// the predictor's to interpret (drop, prefill, constrain), so `tools`
+    /// is forwarded verbatim whenever present. Anthropic-only knobs stay
+    /// `None`.
+    pub fn chat_inputs(&self) -> Result<ChatInputs> {
+        let tools = match &self.tools {
+            Some(tools) if !tools.is_empty() => Some(
+                tools
+                    .iter()
+                    .map(serde_json::to_value)
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(|e| MunaError::Prediction(e.to_string()))?
+            ),
+            _ => None,
+        };
+        Ok(ChatInputs {
+            messages: normalize_messages(&self.messages)?,
+            tools,
+            response_format: self.response_format.clone(),
+            reasoning_effort: self.reasoning_effort.map(|e| e.as_str().to_string()),
+            max_output_tokens: self.max_completion_tokens,
+            temperature: self.temperature,
+            top_p: self.top_p,
+            frequency_penalty: self.frequency_penalty,
+            presence_penalty: self.presence_penalty,
+            stop_sequences: None,
+            top_k: None,
+        })
+    }
 }
 
-/// Conversation after content-part normalization: messages ready for the
-/// predictor's messages input, plus the parallel media lists their
-/// placeholders index into.
-#[derive(Debug)]
-struct NormalizedConversation {
-    messages: Vec<serde_json::Value>,
+/// Messages as the chat predictor receives them: wire shape preserved,
+/// except media parts are swapped for payload-free `{"type": "image"}` /
+/// `{"type": "audio"}` placeholders (the nth placeholder across the
+/// conversation indexes the nth entry of the parallel media input). Text
+/// and refusal parts ride through untouched: the compiled chat template
+/// flattens and canonicalizes content parts itself.
+fn normalize_messages(messages: &[ChatCompletionMessage]) -> Result<Vec<serde_json::Value>> {
+    messages
+        .iter()
+        .map(|message| {
+            let mut value = serde_json::to_value(message)
+                .map_err(|e| MunaError::Prediction(e.to_string()))?;
+            if let Some(parts) = value.get_mut("content").and_then(|c| c.as_array_mut()) {
+                for part in parts.iter_mut() {
+                    match part.get("type").and_then(|t| t.as_str()) {
+                        Some("image_url") => *part = json!({ "type": "image" }),
+                        Some("input_audio") => *part = json!({ "type": "audio" }),
+                        _ => {}
+                    }
+                }
+            }
+            Ok(value)
+        })
+        .collect()
+}
+
+/// Media content parts in order of appearance across the conversation;
+/// the nth image / audio part here is the nth placeholder `normalize_messages`
+/// emits and the nth entry of the corresponding parallel media input.
+fn media_parts(messages: &[ChatCompletionMessage]) -> Vec<&ChatCompletionContentPart> {
+    messages
+        .iter()
+        .filter_map(|message| match &message.content {
+            Some(ChatCompletionContent::Parts(parts)) => Some(parts.iter()),
+            _ => None,
+        })
+        .flatten()
+        .filter(|part| !matches!(
+            part,
+            ChatCompletionContentPart::Text { .. } | ChatCompletionContentPart::Refusal { .. }
+        ))
+        .collect()
+}
+
+/// Decoded media for the predictor's parallel media inputs.
+#[derive(Debug, Default)]
+struct DecodedMedia {
     images: Vec<types::Image>,
     audios: Vec<types::Tensor>,
 }
 
-/// Normalize content parts across all messages: flatten textual content
-/// to plain strings, decode media parts into parallel lists correlated by
-/// order of appearance, and reject modalities the model does not declare.
-async fn normalize_conversation(
+/// Decode the conversation's media parts in order of appearance, rejecting
+/// modalities the model does not declare.
+async fn decode_media(
     client: &dyn Client,
     messages: &[ChatCompletionMessage],
     info: &DelegateInfo
-) -> Result<NormalizedConversation> {
-    let mut normalized = Vec::with_capacity(messages.len());
-    let mut images = Vec::new();
-    let mut audios = Vec::new();
-    for message in messages {
-        let content: Option<serde_json::Value> = match &message.content {
-            None => None,
-            Some(content @ ChatCompletionContent::Text(_)) => Some(content.flatten().into()),
-            Some(content @ ChatCompletionContent::Parts(_)) if content.is_text() => {
-                Some(content.flatten().into())
+) -> Result<DecodedMedia> {
+    let mut media = DecodedMedia::default();
+    for part in media_parts(messages) {
+        match part {
+            ChatCompletionContentPart::ImageUrl { image_url }
+                if info.images_param_name.is_some() =>
+            {
+                media.images.push(decode_image(client, &image_url.url).await?);
             }
-            Some(ChatCompletionContent::Parts(source_parts)) => {
-                let mut parts = Vec::with_capacity(source_parts.len());
-                for part in source_parts {
-                    match part {
-                        ChatCompletionContentPart::Text { .. } |
-                        ChatCompletionContentPart::Refusal { .. } => {
-                            parts.push(serde_json::to_value(part)?);
-                        }
-                        ChatCompletionContentPart::ImageUrl { image_url }
-                            if info.images_param_name.is_some() =>
-                        {
-                            images.push(decode_image(client, &image_url.url).await?);
-                            parts.push(media_placeholder("image"));
-                        }
-                        ChatCompletionContentPart::InputAudio { input_audio }
-                            if info.audios_param_name.is_some() =>
-                        {
-                            audios.push(decode_audio(input_audio, info.audio_sample_rate)?);
-                            parts.push(media_placeholder("audio"));
-                        }
-                        ChatCompletionContentPart::ImageUrl { .. } => {
-                            return Err(MunaError::InvalidInput(
-                                "`image_url` content is not supported by this model.".into(),
-                            ));
-                        }
-                        ChatCompletionContentPart::InputAudio { .. } => {
-                            return Err(MunaError::InvalidInput(
-                                "`input_audio` content is not supported by this model.".into(),
-                            ));
-                        }
-                        ChatCompletionContentPart::File { .. } => {
-                            return Err(MunaError::InvalidInput(
-                                "File content parts are not yet supported.".into(),
-                            ));
-                        }
-                    }
-                }
-                Some(serde_json::Value::Array(parts))
+            ChatCompletionContentPart::InputAudio { input_audio }
+                if info.audios_param_name.is_some() =>
+            {
+                media.audios.push(decode_audio(input_audio, info.audio_sample_rate)?);
             }
-        };
-        let mut value = json!({ "role": message.role, "content": content });
-        if let Some(reasoning) = &message.reasoning_content {
-            value["reasoning_content"] = reasoning.clone().into();
+            ChatCompletionContentPart::ImageUrl { .. } => {
+                return Err(MunaError::InvalidInput(
+                    "`image_url` content is not supported by this model.".into(),
+                ));
+            }
+            ChatCompletionContentPart::InputAudio { .. } => {
+                return Err(MunaError::InvalidInput(
+                    "`input_audio` content is not supported by this model.".into(),
+                ));
+            }
+            ChatCompletionContentPart::File { .. } => {
+                return Err(MunaError::InvalidInput(
+                    "File content parts are not yet supported.".into(),
+                ));
+            }
+            ChatCompletionContentPart::Text { .. } | ChatCompletionContentPart::Refusal { .. } => {}
         }
-        if let Some(tool_calls) = &message.tool_calls {
-            value["tool_calls"] = serde_json::to_value(tool_calls)
-                .map_err(|e| MunaError::Prediction(e.to_string()))?;
-        }
-        if let Some(tool_call_id) = &message.tool_call_id {
-            value["tool_call_id"] = tool_call_id.clone().into();
-        }
-        normalized.push(value);
     }
-    Ok(NormalizedConversation {
-        messages: normalized,
-        images,
-        audios,
-    })
+    Ok(media)
 }
 
 /// Maximum size of a remotely-fetched image.
@@ -787,18 +666,13 @@ mod tests {
 
     fn delegate_info(images: bool) -> DelegateInfo {
         DelegateInfo {
-            input_param_name: "messages".to_string(),
-            response_format_param_name: None,
-            reasoning_effort_param_name: None,
-            max_output_tokens_param_name: None,
-            temperature_param_name: None,
-            top_p_param_name: None,
-            frequency_penalty_param_name: None,
-            presence_penalty_param_name: None,
+            signature: serde_json::from_value(json!({
+                "inputs": [{ "name": "messages", "dtype": "list" }],
+                "outputs": [],
+            })).unwrap(),
             images_param_name: images.then(|| "images".to_string()),
             audios_param_name: None,
             audio_sample_rate: None,
-            tools_param_name: None,
             completion_param_idx: 0,
         }
     }
@@ -843,28 +717,33 @@ mod tests {
         assert!(!mixed.is_text());
     }
 
-    #[tokio::test]
-    async fn normalize_flattens_text_and_passes_strings_through() {
+    #[test]
+    fn normalize_messages_keeps_text_parts_verbatim() {
+        // The compiled chat template flattens text parts; the client must
+        // not, so the plane's hash path and the predictor see the same bytes.
         let messages: Vec<ChatCompletionMessage> = serde_json::from_value(json!([
             { "role": "system", "content": "You are a helpful assistant." },
             { "role": "user", "content": [
                 { "type": "text", "text": "line one" },
                 { "type": "text", "text": "line two" },
+                { "type": "refusal", "refusal": "I cannot help with that." },
             ] },
         ])).unwrap();
-        let conversation = normalize_conversation(
-            &test_client(),
-            &messages,
-            &delegate_info(false)
-        ).await.unwrap();
-        assert_eq!(conversation.messages[0]["content"], json!("You are a helpful assistant."));
-        assert_eq!(conversation.messages[1]["content"], json!("line one\nline two"));
-        assert!(conversation.images.is_empty());
-        assert!(conversation.audios.is_empty());
+        let normalized = normalize_messages(&messages).unwrap();
+        assert_eq!(normalized[0], json!({ "role": "system", "content": "You are a helpful assistant." }));
+        assert_eq!(
+            normalized[1]["content"],
+            json!([
+                { "type": "text", "text": "line one" },
+                { "type": "text", "text": "line two" },
+                { "type": "refusal", "refusal": "I cannot help with that." },
+            ])
+        );
+        assert!(media_parts(&messages).is_empty());
     }
 
     #[tokio::test]
-    async fn normalize_decodes_image_parts_into_placeholders() {
+    async fn media_parts_decode_into_placeholders() {
         let messages: Vec<ChatCompletionMessage> = serde_json::from_value(json!([
             { "role": "user", "content": [
                 { "type": "text", "text": "describe this" },
@@ -873,15 +752,13 @@ mod tests {
                 } },
             ] },
         ])).unwrap();
-        let conversation = normalize_conversation(
-            &test_client(),
-            &messages,
-            &delegate_info(true)
-        ).await.unwrap();
-        assert_eq!(conversation.images.len(), 1);
-        assert!(conversation.audios.is_empty());
+        assert_eq!(media_parts(&messages).len(), 1);
+        let media = decode_media(&test_client(), &messages, &delegate_info(true)).await.unwrap();
+        assert_eq!(media.images.len(), 1);
+        assert!(media.audios.is_empty());
+        let normalized = normalize_messages(&messages).unwrap();
         assert_eq!(
-            conversation.messages[0]["content"],
+            normalized[0]["content"],
             json!([
                 { "type": "text", "text": "describe this" },
                 { "type": "image" },
@@ -890,28 +767,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn normalize_rejects_undeclared_and_file_modalities() {
+    async fn decode_media_rejects_undeclared_and_file_modalities() {
         let messages: Vec<ChatCompletionMessage> = serde_json::from_value(json!([
             { "role": "user", "content": [
                 { "type": "image_url", "image_url": { "url": "data:image/png;base64,AAAA" } },
             ] },
         ])).unwrap();
-        let error = normalize_conversation(
-            &test_client(),
-            &messages,
-            &delegate_info(false)
-        ).await.unwrap_err();
+        let error = decode_media(&test_client(), &messages, &delegate_info(false)).await.unwrap_err();
         assert!(matches!(&error, MunaError::InvalidInput(m) if m.contains("image_url")));
         let messages: Vec<ChatCompletionMessage> = serde_json::from_value(json!([
             { "role": "user", "content": [
                 { "type": "file", "file": { "file_data": "AAAA", "filename": "doc.pdf" } },
             ] },
         ])).unwrap();
-        let error = normalize_conversation(
-            &test_client(),
-            &messages,
-            &delegate_info(true)
-        ).await.unwrap_err();
+        let error = decode_media(&test_client(), &messages, &delegate_info(true)).await.unwrap_err();
         assert!(matches!(&error, MunaError::InvalidInput(m) if m.contains("File content parts")));
     }
 
@@ -953,8 +822,55 @@ mod tests {
         assert_eq!(calls[0].function.arguments, "{\"location\": \"Paris\"}");
     }
 
-    #[tokio::test]
-    async fn normalize_passes_tool_turns_through() {
+    #[test]
+    fn chat_inputs_deserialize_from_wire_body_and_drop_empty_tools() {
+        // Wire body with fields the predictor never sees (`stream`) and the
+        // deprecated `max_tokens` spelling.
+        let params: ChatCompletionCreateParams = serde_json::from_value(json!({
+            "model": "@a/x",
+            "stream": true,
+            "max_tokens": 32,
+            "messages": [{ "role": "user", "content": [{ "type": "text", "text": "hi" }] }],
+            "tools": [{
+                "type": "function",
+                "function": { "name": "get_weather", "parameters": { "type": "object" } },
+            }],
+            "tool_choice": "none",
+            "reasoning_effort": "high",
+            "response_format": { "type": "json_object" },
+            "temperature": 0.5,
+        })).unwrap();
+        assert_eq!(params.max_completion_tokens, Some(32));
+        assert!(params.acceleration.is_none());
+        let inputs = params.chat_inputs().unwrap();
+        assert_eq!(inputs.messages[0]["content"], json!([{ "type": "text", "text": "hi" }]));
+        // Knobs ride through under their denotation names; Anthropic-only
+        // knobs stay unset.
+        assert_eq!(inputs.max_output_tokens, Some(32));
+        assert_eq!(inputs.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(inputs.response_format.as_ref().unwrap()["type"], json!("json_object"));
+        assert_eq!(inputs.temperature, Some(0.5));
+        assert_eq!(inputs.top_p, None);
+        assert_eq!(inputs.stop_sequences, None);
+        assert_eq!(inputs.top_k, None);
+        // `tool_choice: none` does not drop tools: that is the predictor's call.
+        assert_eq!(
+            inputs.tools,
+            Some(vec![json!({
+                "type": "function",
+                "function": { "name": "get_weather", "parameters": { "type": "object" } },
+            })])
+        );
+        let params: ChatCompletionCreateParams = serde_json::from_value(json!({
+            "model": "@a/x",
+            "messages": [],
+            "tools": [],
+        })).unwrap();
+        assert_eq!(params.chat_inputs().unwrap().tools, None);
+    }
+
+    #[test]
+    fn normalize_messages_passes_tool_turns_through() {
         let messages: Vec<ChatCompletionMessage> = serde_json::from_value(json!([
             { "role": "assistant", "content": null, "tool_calls": [{
                 "id": "call_123",
@@ -963,17 +879,10 @@ mod tests {
             }] },
             { "role": "tool", "content": "18C and sunny", "tool_call_id": "call_123" },
         ])).unwrap();
-        let conversation = normalize_conversation(
-            &test_client(),
-            &messages,
-            &delegate_info(false)
-        ).await.unwrap();
-        assert_eq!(
-            conversation.messages[0]["tool_calls"][0]["function"]["name"],
-            json!("get_weather")
-        );
-        assert_eq!(conversation.messages[1]["role"], json!("tool"));
-        assert_eq!(conversation.messages[1]["tool_call_id"], json!("call_123"));
+        let normalized = normalize_messages(&messages).unwrap();
+        assert_eq!(normalized[0]["tool_calls"][0]["function"]["name"], json!("get_weather"));
+        assert_eq!(normalized[1]["role"], json!("tool"));
+        assert_eq!(normalized[1]["tool_call_id"], json!("call_123"));
     }
 
     #[test]

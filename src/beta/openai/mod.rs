@@ -7,12 +7,14 @@ mod chat;
 mod completions;
 mod embeddings;
 mod images;
+mod inputs;
 mod schema;
 
 pub use chat::*;
 pub use completions::*;
 pub use embeddings::*;
 pub use images::*;
+pub use inputs::*;
 pub use schema::*;
 
 use std::sync::Arc;

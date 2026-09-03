@@ -402,31 +402,47 @@ impl ChatCompletionReasoningEffort {
 }
 
 /// Parameters for creating a chat completion.
-#[derive(Debug, Clone, Default)]
+///
+/// Deserializes from an OpenAI chat completions request body (unknown
+/// fields such as `stream` are ignored) so servers and the control plane
+/// share one wire shape.
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct ChatCompletionCreateParams {
     /// Chat predictor tag.
     pub model: String,
     /// Messages comprising the conversation so far.
+    #[serde(default)]
     pub messages: Vec<ChatCompletionMessage>,
     /// Tools the model may call.
+    #[serde(default)]
     pub tools: Option<Vec<ChatCompletionFunctionTool>>,
     /// Tool choice mode. Defaults to `auto`.
+    #[serde(default)]
     pub tool_choice: Option<ChatCompletionToolChoice>,
     /// Response format.
+    #[serde(default)]
     pub response_format: Option<serde_json::Map<String, serde_json::Value>>,
     /// Reasoning effort for reasoning models.
+    #[serde(default)]
     pub reasoning_effort: Option<ChatCompletionReasoningEffort>,
-    /// Maximum completion tokens.
+    /// Maximum completion tokens. Accepts OpenAI's deprecated `max_tokens`
+    /// spelling as an alias.
+    #[serde(default, alias = "max_tokens")]
     pub max_completion_tokens: Option<i32>,
     /// Sampling temperature to use.
+    #[serde(default)]
     pub temperature: Option<f32>,
     /// Nucleus sampling coefficient.
+    #[serde(default)]
     pub top_p: Option<f32>,
     /// Token frequency penalty.
+    #[serde(default)]
     pub frequency_penalty: Option<f32>,
     /// Token presence penalty.
+    #[serde(default)]
     pub presence_penalty: Option<f32>,
-    /// Prediction acceleration.
+    /// Prediction acceleration. Not a wire field.
+    #[serde(skip)]
     pub acceleration: Option<Acceleration>,
 }
 
