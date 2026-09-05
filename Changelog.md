@@ -1,5 +1,5 @@
 ## 0.0.20
-*INCOMPLETE*
++ Resource download improvements.
 
 ## 0.0.19
 + Minor updates.

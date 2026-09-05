@@ -370,6 +370,18 @@ impl MunaClient {
         path: &Path,
         progress: Option<DownloadProgressFn>,
     ) -> Result<()> {
+        self.download_with(url, path, progress, Self::DOWNLOAD_CHUNK_SIZE).await
+    }
+
+    /// [`Self::download`] with an explicit range size, so tests can drive
+    /// the multi-range path with small payloads.
+    async fn download_with(
+        &self,
+        url: &str,
+        path: &Path,
+        progress: Option<DownloadProgressFn>,
+        chunk_size: u64,
+    ) -> Result<()> {
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             tokio::fs::create_dir_all(parent)
                 .await
@@ -383,7 +395,7 @@ impl MunaClient {
                 as Arc<dyn Fn(u64) + Send + Sync>
         });
         let result = match size {
-            Some(size) => self.download_ranges(url, &tmp_path, size, &progress).await,
+            Some(size) => self.download_ranges(url, &tmp_path, size, chunk_size, &progress).await,
             None => self.download_stream(url, &tmp_path, &progress).await,
         };
         match result {
@@ -424,62 +436,50 @@ impl MunaClient {
         content_range.rsplit('/').next()?.parse::<u64>().ok()
     }
 
-    /// Download a resource using concurrent range requests. A single range
-    /// (small file) streams straight to the destination; otherwise each chunk
-    /// goes to its own part file which are then assembled in order.
+    /// Download a resource using concurrent range requests, each written at
+    /// its offset into ONE preallocated file. No part files, no assembly
+    /// pass: every byte is written to disk exactly once.
     async fn download_ranges(
         &self,
         url: &str,
         path: &Path,
         size: u64,
+        chunk_size: u64,
         progress: &ChunkProgressFn,
     ) -> Result<()> {
         use futures_util::stream::{StreamExt, TryStreamExt};
+        let file = tokio::fs::File::create(path)
+            .await
+            .map_err(|e| MunaError::Prediction(format!("Failed to create file: {e}")))?;
+        file.set_len(size)
+            .await
+            .map_err(|e| MunaError::Prediction(format!("Failed to allocate file: {e}")))?;
+        let file = Arc::new(file.into_std().await);
         // Build the byte ranges that cover the file.
-        let mut ranges: Vec<(usize, u64, u64)> = Vec::new();
+        let mut ranges: Vec<(u64, u64)> = Vec::new();
         let mut start = 0u64;
-        let mut index = 0usize;
         while start < size {
-            let end = (start + Self::DOWNLOAD_CHUNK_SIZE).min(size) - 1;
-            ranges.push((index, start, end));
+            let end = (start + chunk_size.max(1)).min(size) - 1;
+            ranges.push((start, end));
             start = end + 1;
-            index += 1;
         }
-        let part_count = ranges.len();
-        // Small file: stream the single range straight to the destination,
-        // avoiding the extra part-file assembly pass.
-        if part_count <= 1 {
-            return download_range(&self.http, url, 0, size.saturating_sub(1), path, progress).await;
-        }
-        let parent = path.parent().unwrap_or_else(|| Path::new("."));
-        let file_name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("resource");
-        // Destination names are unique, so the file name alone is a safe,
-        // collision-free prefix for the part files.
-        let part_path = |i: usize| parent.join(format!(".{file_name}.part{i}"));
         // Download each range concurrently, capping the number of open connections.
-        let download_result = futures_util::stream::iter(ranges)
-            .map(|(i, start, end)| {
+        futures_util::stream::iter(ranges)
+            .map(|(start, end)| {
                 let http = self.http.clone();
                 let url = url.to_string();
-                let part = part_path(i);
+                let file = file.clone();
                 let progress = progress.clone();
-                async move { download_range(&http, &url, start, end, &part, &progress).await }
+                async move { download_range(&http, &url, start, end, file, &progress).await }
             })
             .buffer_unordered(Self::DOWNLOAD_MAX_FILES)
             .try_collect::<Vec<()>>()
-            .await;
-        // Assemble the part files into the destination on success; always clean up.
-        let result = match download_result {
-            Ok(_) => assemble_parts(path, &part_path, part_count).await,
-            Err(e) => Err(e),
-        };
-        for i in 0..part_count {
-            let _ = tokio::fs::remove_file(part_path(i)).await;
-        }
-        result
+            .await?;
+        // Durability + writeback bound: the data is on disk before the
+        // rename publishes it, so a multi-file prefetch never leaves tens of
+        // GB of dirty pages behind for the next engine load to fight.
+        let file = Arc::try_unwrap(file).expect("all range tasks finished");
+        sync_file(file).await
     }
 
     /// Upload a resource and return the resource URL.
@@ -669,8 +669,16 @@ impl MunaClient {
         file.flush()
             .await
             .map_err(|e| MunaError::Prediction(format!("Failed to flush file: {e}")))?;
-        Ok(())
+        sync_file(file.into_std().await).await
     }
+}
+
+/// `fsync` a downloaded file off the async runtime before it is published.
+async fn sync_file(file: std::fs::File) -> Result<()> {
+    tokio::task::spawn_blocking(move || file.sync_all())
+        .await
+        .map_err(|e| MunaError::Prediction(format!("Failed to sync file: {e}")))?
+        .map_err(|e| MunaError::Prediction(format!("Failed to sync file: {e}")))
 }
 
 #[async_trait]
@@ -733,13 +741,15 @@ fn download_temp_path(path: &Path) -> PathBuf {
 /// the download loops report plain byte increments.
 type ChunkProgressFn = Option<Arc<dyn Fn(u64) + Send + Sync>>;
 
-/// Download a single byte range to a file.
+/// Download one byte range and write it at `start` in the shared file.
+/// Positional writes need no seek, so concurrent ranges share one
+/// descriptor.
 async fn download_range(
     http: &reqwest::Client,
     url: &str,
     start: u64,
     end: u64,
-    path: &Path,
+    file: Arc<std::fs::File>,
     progress: &ChunkProgressFn,
 ) -> Result<()> {
     let mut response = http
@@ -754,20 +764,61 @@ async fn download_range(
             status: status.as_u16(),
         });
     }
-    let mut file = tokio::fs::File::create(path)
-        .await
-        .map_err(|e| MunaError::Prediction(format!("Failed to create file: {e}")))?;
+    let mut offset = start;
     while let Some(chunk) = response.chunk().await? {
-        file.write_all(&chunk)
+        let file = file.clone();
+        let len = chunk.len() as u64;
+        tokio::task::spawn_blocking(move || write_all_at(&file, &chunk, offset))
             .await
+            .map_err(|e| MunaError::Prediction(format!("Failed to write chunk: {e}")))?
             .map_err(|e| MunaError::Prediction(format!("Failed to write chunk: {e}")))?;
+        offset += len;
         if let Some(report) = progress {
-            report(chunk.len() as u64);
+            report(len);
         }
     }
-    file.flush()
-        .await
-        .map_err(|e| MunaError::Prediction(format!("Failed to flush file: {e}")))?;
+    Ok(())
+}
+
+/// Positional write of the whole buffer at `offset` (`pwrite` semantics).
+#[cfg(unix)]
+fn write_all_at(
+    file: &std::fs::File,
+    buf: &[u8],
+    offset: u64,
+) -> std::io::Result<()> {
+    use std::os::unix::fs::FileExt;
+    file.write_all_at(buf, offset)
+}
+
+/// Positional write of the whole buffer at `offset`. Windows has no
+/// `write_all_at`; loop over `seek_write` (`WriteFile` with an explicit
+/// `OVERLAPPED` offset). Unlike `pwrite` it does update the handle's
+/// cursor, which is harmless here: every write carries its own offset and
+/// nothing reads the cursor.
+#[cfg(windows)]
+fn write_all_at(
+    file: &std::fs::File,
+    mut buf: &[u8],
+    mut offset: u64,
+) -> std::io::Result<()> {
+    use std::os::windows::fs::FileExt;
+    while !buf.is_empty() {
+        match file.seek_write(buf, offset) {
+            Ok(0) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "failed to write whole buffer",
+                ));
+            }
+            Ok(n) => {
+                buf = &buf[n..];
+                offset += n as u64;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
     Ok(())
 }
 
@@ -880,29 +931,6 @@ async fn upload_part(
     }
 }
 
-/// Assemble downloaded part files into the destination in order.
-async fn assemble_parts(
-    path: &Path,
-    part_path: &impl Fn(usize) -> PathBuf,
-    part_count: usize,
-) -> Result<()> {
-    let mut file = tokio::fs::File::create(path)
-        .await
-        .map_err(|e| MunaError::Prediction(format!("Failed to create file: {e}")))?;
-    for i in 0..part_count {
-        let bytes = tokio::fs::read(part_path(i))
-            .await
-            .map_err(|e| MunaError::Prediction(format!("Failed to read part file: {e}")))?;
-        file.write_all(&bytes)
-            .await
-            .map_err(|e| MunaError::Prediction(format!("Failed to write chunk: {e}")))?;
-    }
-    file.flush()
-        .await
-        .map_err(|e| MunaError::Prediction(format!("Failed to flush file: {e}")))?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -984,6 +1012,17 @@ mod tests {
     }
 
     async fn download_to_temp(base: &str, data: &Arc<Vec<u8>>) -> Vec<u8> {
+        download_to_temp_with(base, data, MunaClient::DOWNLOAD_CHUNK_SIZE).await
+    }
+
+    /// Download through the public path with an explicit range size and
+    /// return the bytes. Asserts the directory holds exactly the destination
+    /// afterwards: no `.part` files (temporary or per-range) may survive.
+    async fn download_to_temp_with(
+        base: &str,
+        data: &Arc<Vec<u8>>,
+        chunk_size: u64,
+    ) -> Vec<u8> {
         let client = MunaClient::new(None, None);
         let dir = std::env::temp_dir().join(format!(
             "muna-dl-{}",
@@ -995,11 +1034,17 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("resource.bin");
         client
-            .download(&format!("{base}/resource"), &path, None)
+            .download_with(&format!("{base}/resource"), &path, None, chunk_size)
             .await
             .unwrap();
         let downloaded = std::fs::read(&path).unwrap();
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| name != "resource.bin")
+            .collect();
         let _ = std::fs::remove_dir_all(&dir);
+        assert!(leftovers.is_empty(), "stray files after download: {leftovers:?}");
         assert_eq!(downloaded.len(), data.len());
         downloaded
     }
@@ -1011,6 +1056,51 @@ mod tests {
         let data = test_payload(64 * 1024 * 1024);
         let base = start_server(data.clone(), true);
         assert!(download_to_temp(&base, &data).await == *data);
+    }
+
+    #[tokio::test]
+    async fn test_download_to_file_many_ranges() {
+        // A small range size over a payload that is not a multiple of it:
+        // many concurrent ranges (more than DOWNLOAD_MAX_FILES) land at
+        // their offsets in the one preallocated file, including the short
+        // tail range.
+        let data = test_payload(3 * 1024 * 1024 + 12_345);
+        let base = start_server(data.clone(), true);
+        assert!(download_to_temp_with(&base, &data, 64 * 1024).await == *data);
+    }
+
+    #[tokio::test]
+    async fn test_download_to_file_reports_full_progress() {
+        // Progress increments across all ranges sum to the probed size.
+        let data = test_payload(1024 * 1024 + 7);
+        let base = start_server(data.clone(), true);
+        let client = MunaClient::new(None, None);
+        let dir = std::env::temp_dir().join(format!(
+            "muna-dl-progress-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("resource.bin");
+        let reported = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let total = Arc::new(std::sync::Mutex::new(None));
+        let progress: DownloadProgressFn = {
+            let reported = reported.clone();
+            let total = total.clone();
+            Arc::new(move |increment, size| {
+                reported.fetch_add(increment, std::sync::atomic::Ordering::SeqCst);
+                *total.lock().unwrap() = size;
+            })
+        };
+        client
+            .download_with(&format!("{base}/resource"), &path, Some(progress), 128 * 1024)
+            .await
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(reported.load(std::sync::atomic::Ordering::SeqCst), data.len() as u64);
+        assert_eq!(*total.lock().unwrap(), Some(data.len() as u64));
     }
 
     #[tokio::test]
