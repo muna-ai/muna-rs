@@ -1,5 +1,5 @@
 ## 0.0.21
-*INCOMPLETE*
++ Minor stability improvements.
 
 ## 0.0.20
 + Resource download improvements.

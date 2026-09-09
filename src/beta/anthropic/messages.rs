@@ -352,7 +352,7 @@ fn gather_prediction_outputs(
         while let Some(prediction) = predictions.next().await {
             let prediction = prediction?;
             if let Some(error) = prediction.error {
-                Err(MunaError::Prediction(error))?;
+                Err(MunaError::from_prediction_error(error))?;
             }
             let results = prediction
                 .results

@@ -130,7 +130,7 @@ impl ImageService {
 
         let prediction = self.create_prediction(&tag, prediction_inputs, acceleration).await?;
         if let Some(error) = &prediction.error {
-            return Err(MunaError::Prediction(error.clone()));
+            return Err(MunaError::from_prediction_error(error.clone()));
         }
         let results = prediction.results.as_ref().ok_or_else(|| {
             MunaError::Prediction("No results returned".into())

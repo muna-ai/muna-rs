@@ -411,7 +411,7 @@ fn gather_completion_output(
     model: &str,
 ) -> Result<serde_json::Map<String, serde_json::Value>> {
     if let Some(error) = prediction.error {
-        return Err(MunaError::Prediction(error));
+        return Err(MunaError::from_prediction_error(error));
     }
     let results = prediction
         .results

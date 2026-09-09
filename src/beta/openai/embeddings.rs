@@ -42,7 +42,11 @@ pub struct EmbeddingService {
 }
 
 impl EmbeddingService {
-    pub fn new(predictors: PredictorService, predictions: PredictionService) -> Self {
+
+    pub fn new(
+        predictors: PredictorService,
+        predictions: PredictionService
+    ) -> Self {
         Self {
             predictors,
             predictions,
@@ -67,6 +71,17 @@ impl EmbeddingService {
         acceleration: Option<Acceleration>,
     ) -> Result<EmbeddingCreateResponse> {
         let input_texts = input;
+        // Check that input texts are not empty
+        if input_texts.is_empty() {
+            return Err(MunaError::InvalidInput(
+                "`input` must contain at least one string.".into(),
+            ));
+        }
+        if let Some(index) = input_texts.iter().position(|text| text.trim().is_empty()) {
+            return Err(MunaError::InvalidInput(format!(
+                "`input[{index}]` is empty. Each input must be a non-empty string."
+            )));
+        }
         let encoding_format = encoding_format.unwrap_or(EncodingFormat::Float);
         let acceleration = acceleration.unwrap_or(Acceleration::LocalAuto);
         {
@@ -101,7 +116,7 @@ impl EmbeddingService {
             .create(model, Some(input_map), Some(acceleration), None, None)
             .await?;
         if let Some(ref error) = prediction.error {
-            return Err(MunaError::Prediction(error.clone()));
+            return Err(MunaError::from_prediction_error(error.clone()));
         }
         let results = prediction
             .results

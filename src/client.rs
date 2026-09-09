@@ -41,10 +41,37 @@ pub enum MunaError {
 }
 
 impl MunaError {
+
     pub fn api_status(&self) -> Option<u16> {
         match self {
             Self::Api { status, .. } => Some(*status),
             _ => None,
+        }
+    }
+
+    /// Classify a predictor's `prediction.error` string.
+    ///
+    /// Predictors raise Python exceptions; the runtime formats them as
+    /// `Type: message` (optionally preceded by a traceback and a chain of
+    /// causes, the innermost first). `ValueError` and `TypeError` are
+    /// Python's caller-fault exceptions, so they become `InvalidInput`
+    /// (a 400 on servers) instead of an opaque `Prediction` error (a 500).
+    pub fn from_prediction_error(error: impl Into<String>) -> Self {
+        let error = error.into();
+        // The outermost exception is the last one in the chain; only its
+        // first line carries the `Type: message` header.
+        let header = error
+            .rsplit("\n\nThe above exception was the direct cause of the following exception:\n\n")
+            .next()
+            .unwrap_or(&error)
+            .lines()
+            .find(|line| !line.is_empty() && !line.starts_with(' ') && !line.starts_with("Traceback"))
+            .unwrap_or("");
+        const CALLER_FAULTS: [&str; 2] = ["ValueError: ", "TypeError: "];
+        if CALLER_FAULTS.iter().any(|prefix| header.starts_with(prefix)) {
+            Self::InvalidInput(error)
+        } else {
+            Self::Prediction(error)
         }
     }
 }
