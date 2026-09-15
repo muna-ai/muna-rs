@@ -1,3 +1,6 @@
+## 0.0.23
+*INCOMPLETE*
+
 ## 0.0.22
 + Added request validation to ensure `messages` must be non-empty in OpenAI- and Anthropic-compatible clients.
 
