@@ -112,7 +112,7 @@ impl MessageService {
                 ))
             })?
         };
-        let input_map = bind_chat_inputs(params.chat_inputs(), &info.signature)?;
+        let input_map = bind_chat_inputs(params.chat_inputs()?, &info.signature)?;
         let acceleration = params.acceleration.unwrap_or(Acceleration::LocalAuto);
         Ok((input_map, info.output_param_idx, acceleration))
     }
@@ -180,8 +180,19 @@ impl MessageCreateParams {
     /// predictor can declare them for this surface. Chat predictors speak
     /// the OpenAI contract, so this is the whole Anthropic adaptation of the
     /// request; servers and the control plane's router-hash path both call it.
-    pub fn chat_inputs(&self) -> ChatInputs {
-        ChatInputs {
+    ///
+    /// Fails with `InvalidInput` when a message carries nothing for the model
+    /// to read (see `validate_message`).
+    pub fn chat_inputs(&self) -> Result<ChatInputs> {
+        if self.messages.is_empty() {
+            return Err(MunaError::InvalidInput(
+                "`messages` must contain at least one message.".into(),
+            ));
+        }
+        for (index, message) in self.messages.iter().enumerate() {
+            validate_message(index, message)?;
+        }
+        Ok(ChatInputs {
             messages: to_openai_messages(self.system.as_ref(), &self.messages),
             tools: self
                 .tools
@@ -197,8 +208,27 @@ impl MessageCreateParams {
             presence_penalty: None,
             stop_sequences: self.stop_sequences.clone(),
             top_k: self.top_k,
-        }
+        })
     }
+}
+
+/// Reject a message that carries nothing for the model to read.
+fn validate_message(index: usize, message: &MessageParam) -> Result<()> {
+    let has_payload = match &message.content {
+        MessageContent::Text(text) => !text.trim().is_empty(),
+        MessageContent::Blocks(blocks) => blocks.iter().any(|block| match block {
+            ContentBlockParam::Text { text } => !text.trim().is_empty(),
+            ContentBlockParam::ToolUse { .. } | ContentBlockParam::ToolResult { .. } => true,
+        }),
+    };
+    if has_payload {
+        return Ok(());
+    }
+    Err(MunaError::InvalidInput(format!(
+        "`messages[{index}]` ({} message) must have non-empty `content`. Text \
+        content must contain non-whitespace characters.",
+        message.role
+    )))
 }
 
 /// Anthropic request -> OpenAI-shaped messages, exactly as the chat
@@ -840,7 +870,7 @@ mod tests {
             "top_k": 40,
             "temperature": 0.5,
         })).unwrap();
-        let inputs = params.chat_inputs();
+        let inputs = params.chat_inputs().unwrap();
         // `max_tokens` is the shared `max_output_tokens` knob; Anthropic-only
         // knobs ride through; OpenAI-only knobs stay unset.
         assert_eq!(inputs.max_output_tokens, Some(64));
@@ -871,10 +901,49 @@ mod tests {
         let params: MessageCreateParams = serde_json::from_value(serde_json::json!({
             "model": "@a/x",
             "max_tokens": 64,
-            "messages": [],
+            "messages": [{ "role": "user", "content": "hi" }],
             "tools": [],
         })).unwrap();
-        assert_eq!(params.chat_inputs().tools, None);
+        assert_eq!(params.chat_inputs().unwrap().tools, None);
+    }
+
+    #[test]
+    fn chat_inputs_reject_messages_without_payload() {
+        fn inputs(messages: serde_json::Value) -> Result<ChatInputs> {
+            let params: MessageCreateParams = serde_json::from_value(serde_json::json!({
+                "model": "@a/x",
+                "max_tokens": 64,
+                "messages": messages,
+            })).unwrap();
+            params.chat_inputs()
+        }
+        // Whitespace-only text renders as an empty turn once the chat
+        // template trims it; reject it like Anthropic does.
+        for content in [
+            serde_json::json!("   "),
+            serde_json::json!(""),
+            serde_json::json!([]),
+            serde_json::json!([{ "type": "text", "text": " \n" }]),
+        ] {
+            let error = inputs(serde_json::json!([{ "role": "user", "content": content }]))
+                .err()
+                .unwrap_or_else(|| panic!("{content} was accepted"));
+            assert!(matches!(error, MunaError::InvalidInput(_)), "{error}");
+            assert!(error.to_string().contains("messages[0]"), "{error}");
+        }
+        assert!(matches!(
+            inputs(serde_json::json!([])),
+            Err(MunaError::InvalidInput(_))
+        ));
+        // Tool blocks are payload on their own, including an empty result.
+        inputs(serde_json::json!([
+            { "role": "user", "content": "weather?" },
+            { "role": "assistant", "content": [{
+                "type": "tool_use", "id": "t1", "name": "get_weather", "input": {}
+            }] },
+            { "role": "user", "content": [{ "type": "tool_result", "tool_use_id": "t1" }] },
+        ])).unwrap();
+        inputs(serde_json::json!([{ "role": "user", "content": " hi " }])).unwrap();
     }
 
     #[test]

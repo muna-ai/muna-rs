@@ -253,9 +253,16 @@ impl ChatCompletionCreateParams {
 /// and refusal parts ride through untouched: the compiled chat template
 /// flattens and canonicalizes content parts itself.
 fn normalize_messages(messages: &[ChatCompletionMessage]) -> Result<Vec<serde_json::Value>> {
+    if messages.is_empty() {
+        return Err(MunaError::InvalidInput(
+            "`messages` must contain at least one message.".into(),
+        ));
+    }
     messages
         .iter()
-        .map(|message| {
+        .enumerate()
+        .map(|(index, message)| {
+            validate_message(index, message)?;
             let mut value = serde_json::to_value(message)
                 .map_err(|e| MunaError::Prediction(e.to_string()))?;
             if let Some(parts) = value.get_mut("content").and_then(|c| c.as_array_mut()) {
@@ -270,6 +277,38 @@ fn normalize_messages(messages: &[ChatCompletionMessage]) -> Result<Vec<serde_js
             Ok(value)
         })
         .collect()
+}
+
+/// Reject a message that carries nothing for the model to read.
+fn validate_message(index: usize, message: &ChatCompletionMessage) -> Result<()> {
+    if message.role == "tool" {
+        return Ok(());
+    }
+    if message.tool_calls.as_ref().is_some_and(|calls| !calls.is_empty()) {
+        return Ok(());
+    }
+    let has_payload = match &message.content {
+        None => false,
+        Some(ChatCompletionContent::Text(text)) => !text.trim().is_empty(),
+        Some(ChatCompletionContent::Parts(parts)) => parts.iter().any(|part| match part {
+            ChatCompletionContentPart::Text { text } => !text.trim().is_empty(),
+            ChatCompletionContentPart::Refusal { refusal } => !refusal.trim().is_empty(),
+            _ => true,
+        }),
+    };
+    if has_payload {
+        return Ok(());
+    }
+    let what = if message.role == "assistant" {
+        "non-empty `content` or `tool_calls`"
+    } else {
+        "non-empty `content`"
+    };
+    Err(MunaError::InvalidInput(format!(
+        "`messages[{index}]` ({} message) must have {what}. Text content must \
+        contain non-whitespace characters.",
+        message.role
+    )))
 }
 
 /// Media content parts in order of appearance across the conversation;
@@ -863,10 +902,58 @@ mod tests {
         );
         let params: ChatCompletionCreateParams = serde_json::from_value(json!({
             "model": "@a/x",
-            "messages": [],
+            "messages": [{ "role": "user", "content": "hi" }],
             "tools": [],
         })).unwrap();
         assert_eq!(params.chat_inputs().unwrap().tools, None);
+    }
+
+    #[test]
+    fn chat_inputs_reject_messages_without_payload() {
+        fn inputs(messages: serde_json::Value) -> Result<ChatInputs> {
+            let params: ChatCompletionCreateParams = serde_json::from_value(json!({
+                "model": "@a/x",
+                "messages": messages,
+            })).unwrap();
+            params.chat_inputs()
+        }
+        // Whitespace-only text renders as an empty turn once the chat
+        // template trims it (Gemma 4 then describes an image it never got);
+        // reject it like OpenAI does.
+        for content in [
+            json!("   "),
+            json!(""),
+            json!(null),
+            json!([]),
+            json!([{ "type": "text", "text": " \n" }]),
+        ] {
+            let error = inputs(json!([{ "role": "user", "content": content }]))
+                .err()
+                .unwrap_or_else(|| panic!("{content} was accepted"));
+            assert!(matches!(error, MunaError::InvalidInput(_)), "{error}");
+            assert!(error.to_string().contains("messages[0]"), "{error}");
+        }
+        let error = inputs(json!([
+            { "role": "user", "content": "hi" },
+            { "role": "assistant", "content": "" },
+        ])).err().unwrap();
+        assert!(error.to_string().contains("messages[1]"), "{error}");
+        assert!(error.to_string().contains("tool_calls"), "{error}");
+        assert!(matches!(inputs(json!([])), Err(MunaError::InvalidInput(_))));
+        // Media parts, assistant tool calls, and (possibly empty) tool
+        // results are payload on their own.
+        inputs(json!([{ "role": "user", "content": [
+            { "type": "image_url", "image_url": { "url": "data:image/png;base64,AA==" } },
+        ] }])).unwrap();
+        inputs(json!([
+            { "role": "user", "content": "weather?" },
+            { "role": "assistant", "content": null, "tool_calls": [{
+                "id": "t1", "type": "function",
+                "function": { "name": "get_weather", "arguments": "{}" },
+            }] },
+            { "role": "tool", "tool_call_id": "t1", "content": "" },
+        ])).unwrap();
+        inputs(json!([{ "role": "user", "content": " hi " }])).unwrap();
     }
 
     #[test]
