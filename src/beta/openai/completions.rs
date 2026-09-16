@@ -265,6 +265,12 @@ fn normalize_messages(messages: &[ChatCompletionMessage]) -> Result<Vec<serde_js
             validate_message(index, message)?;
             let mut value = serde_json::to_value(message)
                 .map_err(|e| MunaError::Prediction(e.to_string()))?;
+            // An assistant turn with nothing to say is rendered as an empty
+            // turn by the chat templates; hand them `""` rather than `null`
+            // so templates that index into content need no `is none` guard.
+            if message.role == "assistant" && message.content.is_none() {
+                value["content"] = json!("");
+            }
             if let Some(parts) = value.get_mut("content").and_then(|c| c.as_array_mut()) {
                 for part in parts.iter_mut() {
                     match part.get("type").and_then(|t| t.as_str()) {
@@ -280,11 +286,18 @@ fn normalize_messages(messages: &[ChatCompletionMessage]) -> Result<Vec<serde_js
 }
 
 /// Reject a message that carries nothing for the model to read.
+///
+/// Only messages the model must *answer* are checked. Chat templates trim
+/// text content (Gemma 4's `content | trim`, for one), so a whitespace-only
+/// user turn renders as an EMPTY turn and the model answers a question it was
+/// never asked. An empty assistant turn is different: it is history the model
+/// wrote, and it renders harmlessly as "the assistant said nothing". Clients
+/// legitimately replay such turns -- a reasoning-only completion, a stream
+/// cut off after the role chunk, an agent keeping strict role alternation --
+/// and refusing them wedges the conversation on our own output. Tool results
+/// may be empty by design.
 fn validate_message(index: usize, message: &ChatCompletionMessage) -> Result<()> {
-    if message.role == "tool" {
-        return Ok(());
-    }
-    if message.tool_calls.as_ref().is_some_and(|calls| !calls.is_empty()) {
+    if message.role == "tool" || message.role == "assistant" {
         return Ok(());
     }
     let has_payload = match &message.content {
@@ -299,14 +312,9 @@ fn validate_message(index: usize, message: &ChatCompletionMessage) -> Result<()>
     if has_payload {
         return Ok(());
     }
-    let what = if message.role == "assistant" {
-        "non-empty `content` or `tool_calls`"
-    } else {
-        "non-empty `content`"
-    };
     Err(MunaError::InvalidInput(format!(
-        "`messages[{index}]` ({} message) must have {what}. Text content must \
-        contain non-whitespace characters.",
+        "`messages[{index}]` ({} message) must have non-empty `content`. Text \
+        content must contain non-whitespace characters.",
         message.role
     )))
 }
@@ -933,12 +941,18 @@ mod tests {
             assert!(matches!(error, MunaError::InvalidInput(_)), "{error}");
             assert!(error.to_string().contains("messages[0]"), "{error}");
         }
-        let error = inputs(json!([
-            { "role": "user", "content": "hi" },
-            { "role": "assistant", "content": "" },
-        ])).err().unwrap();
-        assert!(error.to_string().contains("messages[1]"), "{error}");
-        assert!(error.to_string().contains("tool_calls"), "{error}");
+        // Empty assistant turns are replayed history (a reasoning-only
+        // completion, a stream cut after the role chunk) and must pass;
+        // `null` content is handed to the predictor as `""`.
+        for content in [json!(""), json!(null), json!("  ")] {
+            let inputs = inputs(json!([
+                { "role": "user", "content": "hi" },
+                { "role": "assistant", "content": content },
+                { "role": "user", "content": "still there?" },
+            ])).unwrap_or_else(|e| panic!("assistant {content} was rejected: {e}"));
+            assert_eq!(inputs.messages[1]["role"], json!("assistant"));
+            assert!(inputs.messages[1]["content"].is_string(), "{:?}", inputs.messages[1]);
+        }
         assert!(matches!(inputs(json!([])), Err(MunaError::InvalidInput(_))));
         // Media parts, assistant tool calls, and (possibly empty) tool
         // results are payload on their own.

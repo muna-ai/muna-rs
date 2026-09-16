@@ -56,6 +56,9 @@ impl MunaError {
     /// causes, the innermost first). `ValueError` and `TypeError` are
     /// Python's caller-fault exceptions, so they become `InvalidInput`
     /// (a 400 on servers) instead of an opaque `Prediction` error (a 500).
+    /// An `InvalidInput` carries only the message: the exception class is
+    /// an implementation detail the caller cannot act on, and the traceback
+    /// belongs in server logs, not in a 400 body.
     pub fn from_prediction_error(error: impl Into<String>) -> Self {
         let error = error.into();
         // The outermost exception is the last one in the chain; only its
@@ -68,10 +71,12 @@ impl MunaError {
             .find(|line| !line.is_empty() && !line.starts_with(' ') && !line.starts_with("Traceback"))
             .unwrap_or("");
         const CALLER_FAULTS: [&str; 2] = ["ValueError: ", "TypeError: "];
-        if CALLER_FAULTS.iter().any(|prefix| header.starts_with(prefix)) {
-            Self::InvalidInput(error)
-        } else {
-            Self::Prediction(error)
+        let message = CALLER_FAULTS
+            .iter()
+            .find_map(|prefix| header.strip_prefix(prefix));
+        match message {
+            Some(message) => Self::InvalidInput(message.trim().to_string()),
+            None => Self::Prediction(error),
         }
     }
 }
@@ -965,6 +970,48 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::Arc;
     use std::thread;
+
+    #[test]
+    fn caller_fault_strips_class_prefix() {
+        let error = MunaError::from_prediction_error(
+            "ValueError: The input (140052 tokens) is longer than the model's context length (131072 tokens)."
+        );
+        match error {
+            MunaError::InvalidInput(message) => assert_eq!(
+                message,
+                "The input (140052 tokens) is longer than the model's context length (131072 tokens)."
+            ),
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn caller_fault_with_traceback_and_cause_chain() {
+        let error = MunaError::from_prediction_error(concat!(
+            "Traceback (most recent call last):\n",
+            "  File \"x.py\", line 1, in <module>\n",
+            "KeyError: 'content'\n",
+            "\nThe above exception was the direct cause of the following exception:\n\n",
+            "Traceback (most recent call last):\n",
+            "  File \"x.py\", line 2, in <module>\n",
+            "TypeError: messages[0] must have content\n"
+        ));
+        match error {
+            MunaError::InvalidInput(message) => {
+                assert_eq!(message, "messages[0] must have content");
+            }
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn engine_fault_keeps_full_error() {
+        let raw = "RuntimeError: worker poisoned";
+        match MunaError::from_prediction_error(raw) {
+            MunaError::Prediction(message) => assert_eq!(message, raw),
+            other => panic!("expected Prediction, got {other:?}"),
+        }
+    }
 
     /// Start a minimal HTTP server that serves `data`, optionally honoring
     /// HTTP range requests, and return its base URL. When `support_ranges`

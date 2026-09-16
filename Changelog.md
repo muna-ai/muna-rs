@@ -1,5 +1,7 @@
 ## 0.0.23
-*INCOMPLETE*
++ Fixed OpenAI- and Anthropic-compatible clients rejecting assistant messages with empty `content`.
++ Fixed `null` assistant `content` being passed to predictors as `null` instead of `""`.
++ Fixed `MunaError::InvalidInput` messages carrying the Python exception class prefix (`ValueError: `, `TypeError: `) raised by the predictor.
 
 ## 0.0.22
 + Added request validation to ensure `messages` must be non-empty in OpenAI- and Anthropic-compatible clients.

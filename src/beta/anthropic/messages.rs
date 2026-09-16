@@ -213,7 +213,16 @@ impl MessageCreateParams {
 }
 
 /// Reject a message that carries nothing for the model to read.
+///
+/// Only user turns are checked: a whitespace-only user turn renders as an
+/// empty turn once the chat template trims it, and the model answers a
+/// question it was never asked. An empty assistant turn is history the model
+/// wrote (a stream cut off early, a reasoning-only reply) and renders
+/// harmlessly; refusing it would wedge a conversation on our own output.
 fn validate_message(index: usize, message: &MessageParam) -> Result<()> {
+    if message.role == "assistant" {
+        return Ok(());
+    }
     let has_payload = match &message.content {
         MessageContent::Text(text) => !text.trim().is_empty(),
         MessageContent::Blocks(blocks) => blocks.iter().any(|block| match block {
@@ -944,6 +953,14 @@ mod tests {
             { "role": "user", "content": [{ "type": "tool_result", "tool_use_id": "t1" }] },
         ])).unwrap();
         inputs(serde_json::json!([{ "role": "user", "content": " hi " }])).unwrap();
+        // Empty assistant turns are replayed history and must pass.
+        let inputs = inputs(serde_json::json!([
+            { "role": "user", "content": "hi" },
+            { "role": "assistant", "content": "" },
+            { "role": "user", "content": "still there?" },
+        ])).unwrap();
+        assert_eq!(inputs.messages[1]["role"], serde_json::json!("assistant"));
+        assert_eq!(inputs.messages[1]["content"], serde_json::json!(""));
     }
 
     #[test]
