@@ -1,3 +1,6 @@
+## 0.0.24
+*INCOMPLETE*
+
 ## 0.0.23
 + Fixed OpenAI- and Anthropic-compatible clients rejecting assistant messages with empty `content`.
 + Fixed `null` assistant `content` being passed to predictors as `null` instead of `""`.
