@@ -1,3 +1,6 @@
+## 0.0.26
+*INCOMPLETE*
+
 ## 0.0.25
 + Added support for specifying `seed` in `muna.beta.openai.chat.completions.create`.
 + Added `ChatCompletionReasoningEffort::None` for disabling reasoning.
