@@ -238,6 +238,7 @@ impl ChatCompletionCreateParams {
             max_output_tokens: self.max_completion_tokens,
             temperature: self.temperature,
             top_p: self.top_p,
+            seed: self.seed,
             frequency_penalty: self.frequency_penalty,
             presence_penalty: self.presence_penalty,
             stop_sequences: None,
@@ -636,7 +637,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::beta::openai::{ChatCompletionDelta, CompletionTokensDetails};
+    use crate::beta::openai::{
+        ChatCompletionDelta, ChatCompletionReasoningEffort, CompletionTokensDetails
+    };
 
     fn chunk(
         delta: ChatCompletionDelta,
@@ -886,6 +889,7 @@ mod tests {
             "reasoning_effort": "high",
             "response_format": { "type": "json_object" },
             "temperature": 0.5,
+            "seed": 7,
         })).unwrap();
         assert_eq!(params.max_completion_tokens, Some(32));
         assert!(params.acceleration.is_none());
@@ -898,6 +902,7 @@ mod tests {
         assert_eq!(inputs.response_format.as_ref().unwrap()["type"], json!("json_object"));
         assert_eq!(inputs.temperature, Some(0.5));
         assert_eq!(inputs.top_p, None);
+        assert_eq!(inputs.seed, Some(7));
         assert_eq!(inputs.stop_sequences, None);
         assert_eq!(inputs.top_k, None);
         // `tool_choice: none` does not drop tools: that is the predictor's call.
@@ -916,6 +921,20 @@ mod tests {
         assert_eq!(params.chat_inputs().unwrap().tools, None);
     }
 
+
+    #[test]
+    fn reasoning_effort_none_round_trips() {
+        // OpenAI's way of turning reasoning off; predictors map it onto
+        // their template's thinking switch.
+        let params: ChatCompletionCreateParams = serde_json::from_value(json!({
+            "model": "@a/x",
+            "messages": [{ "role": "user", "content": "hi" }],
+            "reasoning_effort": "none",
+        })).unwrap();
+        assert_eq!(params.reasoning_effort, Some(ChatCompletionReasoningEffort::None));
+        let inputs = params.chat_inputs().unwrap();
+        assert_eq!(inputs.reasoning_effort.as_deref(), Some("none"));
+    }
     #[test]
     fn chat_inputs_reject_messages_without_payload() {
         fn inputs(messages: serde_json::Value) -> Result<ChatInputs> {

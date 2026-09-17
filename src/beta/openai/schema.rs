@@ -377,6 +377,8 @@ pub struct ChatCompletionChunk {
 /// Reasoning effort for reasoning models.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ChatCompletionReasoningEffort {
+    #[serde(rename = "none")]
+    None,
     #[serde(rename = "minimal")]
     Minimal,
     #[serde(rename = "low")]
@@ -390,13 +392,15 @@ pub enum ChatCompletionReasoningEffort {
 }
 
 impl ChatCompletionReasoningEffort {
+
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::None    => "none",
             Self::Minimal => "minimal",
-            Self::Low => "low",
-            Self::Medium => "medium",
-            Self::High => "high",
-            Self::XHigh => "xhigh",
+            Self::Low     => "low",
+            Self::Medium  => "medium",
+            Self::High    => "high",
+            Self::XHigh   => "xhigh",
         }
     }
 }
@@ -435,6 +439,9 @@ pub struct ChatCompletionCreateParams {
     /// Nucleus sampling coefficient.
     #[serde(default)]
     pub top_p: Option<f32>,
+    /// Sampling seed for reproducible outputs.
+    #[serde(default)]
+    pub seed: Option<i32>,
     /// Token frequency penalty.
     #[serde(default)]
     pub frequency_penalty: Option<f32>,

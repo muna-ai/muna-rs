@@ -54,11 +54,13 @@ pub struct ChatInputs {
     pub temperature: Option<f32>,
     /// Nucleus sampling coefficient (`openai.chat.completions.top_p`).
     pub top_p: Option<f32>,
+    /// Sampling seed (`openai.chat.completions.seed`).
+    pub seed: Option<i32>,
     /// Token frequency penalty (`openai.chat.completions.frequency_penalty`).
     pub frequency_penalty: Option<f32>,
     /// Token presence penalty (`openai.chat.completions.presence_penalty`).
     pub presence_penalty: Option<f32>,
-    /// Stop sequences (`anthropic.messages.stop_sequences`).
+    /// Stop sequences (`openai.chat.completions.stop`).
     pub stop_sequences: Option<Vec<String>>,
     /// Top-k sampling (`anthropic.messages.top_k`).
     pub top_k: Option<i32>,
@@ -156,6 +158,11 @@ pub fn bind_chat_inputs(
         "openai.chat.completions.top_p"
     );
     bind(
+        inputs.seed.map(Value::Int),
+        INT_DTYPES,
+        "openai.chat.completions.seed"
+    );
+    bind(
         inputs.frequency_penalty.map(Value::Float),
         FLOAT_DTYPES,
         "openai.chat.completions.frequency_penalty"
@@ -170,7 +177,7 @@ pub fn bind_chat_inputs(
             Value::List(sequences.into_iter().map(serde_json::Value::String).collect())
         }),
         &[Dtype::List],
-        "anthropic.messages.stop_sequences"
+        "openai.chat.completions.stop"
     );
     bind(
         inputs.top_k.map(Value::Int),
@@ -202,12 +209,14 @@ mod tests {
               "denotation": "openai.chat.completions.temperature" },
             { "name": "budget", "dtype": "int32", "optional": true,
               "denotation": "openai.chat.completions.max_output_tokens" },
+            { "name": "rng", "dtype": "int32", "optional": true,
+              "denotation": "openai.chat.completions.seed" },
             { "name": "effort", "dtype": "string", "optional": true,
               "denotation": "openai.chat.completions.reasoning_effort" },
             { "name": "format", "dtype": "dict", "optional": true,
               "denotation": "openai.chat.completions.response_format" },
             { "name": "stops", "dtype": "list", "optional": true,
-              "denotation": "anthropic.messages.stop_sequences" },
+              "denotation": "openai.chat.completions.stop" },
             { "name": "k", "dtype": "int32", "optional": true,
               "denotation": "anthropic.messages.top_k" }
         ]));
@@ -219,6 +228,7 @@ mod tests {
             max_output_tokens: Some(64),
             temperature: Some(0.5),
             top_p: Some(0.9),
+            seed: Some(1234),
             frequency_penalty: None,
             presence_penalty: None,
             stop_sequences: Some(vec!["END".into()]),
@@ -236,8 +246,9 @@ mod tests {
             Some(Value::List(s)) if s == &vec![json!("END")]
         ));
         assert!(matches!(map.get("k"), Some(Value::Int(40))));
+        assert!(matches!(map.get("rng"), Some(Value::Int(1234))));
         // `top_p` set but undeclared: silently dropped, nothing else bound.
-        assert_eq!(map.len(), 8);
+        assert_eq!(map.len(), 9);
     }
 
     #[test]

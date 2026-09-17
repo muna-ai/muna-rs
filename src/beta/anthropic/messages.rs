@@ -204,6 +204,7 @@ impl MessageCreateParams {
             max_output_tokens: Some(self.max_tokens),
             temperature: self.temperature,
             top_p: self.top_p,
+            seed: None,
             frequency_penalty: None,
             presence_penalty: None,
             stop_sequences: self.stop_sequences.clone(),
@@ -223,7 +224,21 @@ fn validate_message(index: usize, message: &MessageParam) -> Result<()> {
     if message.role == "assistant" {
         return Ok(());
     }
-    let has_payload = match &message.content {
+    // An inline system turn that is nothing but the billing header is
+    // dropped by `to_openai_messages`, so it is not an empty message.
+    let stripped;
+    let content = if message.role == "system" {
+        match strip_billing_header(&message.content) {
+            Some(content) => {
+                stripped = content;
+                &stripped
+            }
+            None => return Ok(()),
+        }
+    } else {
+        &message.content
+    };
+    let has_payload = match content {
         MessageContent::Text(text) => !text.trim().is_empty(),
         MessageContent::Blocks(blocks) => blocks.iter().any(|block| match block {
             ContentBlockParam::Text { text } => !text.trim().is_empty(),
@@ -240,21 +255,65 @@ fn validate_message(index: usize, message: &MessageParam) -> Result<()> {
     )))
 }
 
+/// Prefix of the text block Claude Code prepends to its system prompt. It
+/// carries a per-request hash, so left in place it changes the prompt on
+/// every turn and defeats prefix caching (and, for us, KV page-hash
+/// routing). Mirrors upstream vLLM
+/// `vllm/entrypoints/anthropic/serving.py:236-272`.
+const BILLING_HEADER_PREFIX: &str = "x-anthropic-billing-header";
+
+/// Drop billing-header text blocks from system content. Returns `None`
+/// when nothing readable remains, so the caller emits no message at all.
+fn strip_billing_header(content: &MessageContent) -> Option<MessageContent> {
+    match content {
+        MessageContent::Text(text) => {
+            (!text.starts_with(BILLING_HEADER_PREFIX)).then(|| content.clone())
+        }
+        MessageContent::Blocks(blocks) => {
+            let kept: Vec<ContentBlockParam> = blocks
+                .iter()
+                .filter(|block| {
+                    !matches!(block, ContentBlockParam::Text { text } if text.starts_with(BILLING_HEADER_PREFIX))
+                })
+                .cloned()
+                .collect();
+            (!kept.is_empty()).then_some(MessageContent::Blocks(kept))
+        }
+    }
+}
+
 /// Anthropic request -> OpenAI-shaped messages, exactly as the chat
 /// predictor receives them. The system prompt is folded in as a leading
 /// `system` message (predictors that need it separately can filter it out).
+///
+/// Billing-header blocks are stripped from the system prompt and from
+/// inline `system` turns (see `strip_billing_header`). Inline `system`
+/// turns otherwise keep their role and position: whether a template
+/// accepts a non-leading system message is the compiled predictor's call
+/// (its `apply_chat_template` probes the template and folds only where
+/// needed), and deciding here would make the plane's router-hash render
+/// and the node's disagree.
 fn to_openai_messages(
     system: Option<&MessageContent>,
     messages: &[MessageParam]
 ) -> Vec<serde_json::Value> {
     let mut result = Vec::with_capacity(messages.len() + usize::from(system.is_some()));
-    if let Some(system) = system {
+    if let Some(system) = system.and_then(strip_billing_header) {
         result.push(serde_json::json!({
             "role": "system",
             "content": system.flatten(),
         }));
     }
     for message in messages {
+        if message.role == "system" {
+            if let Some(content) = strip_billing_header(&message.content) {
+                result.push(serde_json::json!({
+                    "role": "system",
+                    "content": content.flatten(),
+                }));
+            }
+            continue;
+        }
         translate_message_for_openai(message, &mut result);
     }
     result
@@ -961,6 +1020,67 @@ mod tests {
         ])).unwrap();
         assert_eq!(inputs.messages[1]["role"], serde_json::json!("assistant"));
         assert_eq!(inputs.messages[1]["content"], serde_json::json!(""));
+    }
+
+    #[test]
+    fn billing_header_is_stripped_and_inline_system_kept_in_place() {
+        let params: MessageCreateParams = serde_json::from_value(serde_json::json!({
+            "model": "@a/x",
+            "max_tokens": 64,
+            "system": [
+                { "type": "text", "text": "x-anthropic-billing-header: cc_version=2.1 hash=abc" },
+                { "type": "text", "text": "You are Claude Code." }
+            ],
+            "messages": [
+                { "role": "user", "content": "hi" },
+                // Header-only inline system turn: emits nothing.
+                { "role": "system", "content": "x-anthropic-billing-header: hash=def" },
+                // Real inline system turn: role and position preserved; the
+                // compiled predictor decides whether to fold it.
+                { "role": "system", "content": [
+                    { "type": "text", "text": "x-anthropic-billing-header: hash=ghi" },
+                    { "type": "text", "text": "Conversation was compacted." }
+                ] },
+                { "role": "user", "content": "again" },
+            ],
+        })).unwrap();
+        let inputs = params.chat_inputs().unwrap();
+        assert_eq!(
+            inputs.messages,
+            vec![
+                serde_json::json!({ "role": "system", "content": "You are Claude Code." }),
+                serde_json::json!({ "role": "user", "content": "hi" }),
+                serde_json::json!({ "role": "system", "content": "Conversation was compacted." }),
+                serde_json::json!({ "role": "user", "content": "again" }),
+            ]
+        );
+        // A header-only system prompt yields no leading system message.
+        let params: MessageCreateParams = serde_json::from_value(serde_json::json!({
+            "model": "@a/x",
+            "max_tokens": 64,
+            "system": "x-anthropic-billing-header: hash=abc",
+            "messages": [{ "role": "user", "content": "hi" }],
+        })).unwrap();
+        let inputs = params.chat_inputs().unwrap();
+        assert_eq!(inputs.messages, vec![serde_json::json!({ "role": "user", "content": "hi" })]);
+        // An empty inline system turn that is NOT a billing header is still
+        // rejected like any other empty non-assistant message.
+        assert!(matches!(
+            inputs_for(serde_json::json!([
+                { "role": "user", "content": "hi" },
+                { "role": "system", "content": "   " },
+            ])),
+            Err(MunaError::InvalidInput(_))
+        ));
+    }
+
+    fn inputs_for(messages: serde_json::Value) -> Result<ChatInputs> {
+        let params: MessageCreateParams = serde_json::from_value(serde_json::json!({
+            "model": "@a/x",
+            "max_tokens": 64,
+            "messages": messages,
+        })).unwrap();
+        params.chat_inputs()
     }
 
     #[test]

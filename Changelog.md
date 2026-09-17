@@ -1,5 +1,7 @@
 ## 0.0.25
-*INCOMPLETE*
++ Added support for specifying `seed` in `muna.beta.openai.chat.completions.create`.
++ Added `ChatCompletionReasoningEffort::None` for disabling reasoning.
++ Fixed Anthropic-compatible client forwarding Claude Code's per-request `x-anthropic-billing-header` block to the model, which changed the prompt on every turn and defeated prefix caching.
 
 ## 0.0.24
 + Minor stability improvements.
