@@ -9,7 +9,10 @@ pub mod client;
 pub mod services;
 pub mod types;
 
-pub use client::{Client, ClientExt, DownloadProgressFn, MunaClient, MunaError};
+pub use client::{
+    download, Client, ClientExt, DownloadDurability,
+    DownloadProgressFn, MunaClient, MunaError
+};
 pub use types::*;
 
 use std::sync::Arc;

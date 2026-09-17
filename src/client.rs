@@ -254,8 +254,6 @@ pub struct MunaClient {
 impl MunaClient {
     const DEFAULT_URL: &'static str = "https://api.muna.ai/v1";
     const RESOURCE_URL_BASE: &'static str = "https://cdn.fxn.ai/resources";
-    const DOWNLOAD_CHUNK_SIZE: u64 = 50 * 1024 * 1024; // 50 MB per range request
-    const DOWNLOAD_MAX_FILES: usize = 16; // maximum parallel connections
     const MULTIPART_THRESHOLD: u64 = 100 * 1024 * 1024; // 100 MB
     const MULTIPART_CHUNK_SIZE: u64 = 50 * 1024 * 1024; // 50 MB per part
     const UPLOAD_MAX_PARALLEL: usize = 8; // maximum parallel part uploads
@@ -391,127 +389,17 @@ impl MunaClient {
     /// Download a resource to a file, optionally reporting progress through
     /// a callback (see [`DownloadProgressFn`]).
     ///
-    /// Range-capable resources are downloaded with parallel chunked range
-    /// requests to saturate available bandwidth; resources whose server does
-    /// not support range requests fall back to a single-connection stream.
-    /// The download is atomic: data is written to a temporary file in the
-    /// destination directory and renamed into place only on success.
+    /// Atomic and durable: either the complete file appears at `path` or
+    /// nothing does, even across a crash. See [`download`] for the
+    /// mechanics and for the eventual-durability variant servers on
+    /// ephemeral disks use.
     pub async fn download(
         &self,
         url: &str,
         path: &Path,
         progress: Option<DownloadProgressFn>,
     ) -> Result<()> {
-        self.download_with(url, path, progress, Self::DOWNLOAD_CHUNK_SIZE).await
-    }
-
-    /// [`Self::download`] with an explicit range size, so tests can drive
-    /// the multi-range path with small payloads.
-    async fn download_with(
-        &self,
-        url: &str,
-        path: &Path,
-        progress: Option<DownloadProgressFn>,
-        chunk_size: u64,
-    ) -> Result<()> {
-        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| MunaError::Prediction(format!("Failed to create directory: {e}")))?;
-        }
-        let tmp_path = download_temp_path(path);
-        let size = self.probe_download(url).await;
-        // Bind the probed total so the chunk loops report plain increments.
-        let progress: ChunkProgressFn = progress.map(|callback| {
-            Arc::new(move |increment: u64| callback(increment, size))
-                as Arc<dyn Fn(u64) + Send + Sync>
-        });
-        let result = match size {
-            Some(size) => self.download_ranges(url, &tmp_path, size, chunk_size, &progress).await,
-            None => self.download_stream(url, &tmp_path, &progress).await,
-        };
-        match result {
-            Ok(()) => tokio::fs::rename(&tmp_path, path).await.map_err(|e| {
-                MunaError::Prediction(format!(
-                    "Failed to move resource to {}: {e}",
-                    path.display()
-                ))
-            }),
-            Err(e) => {
-                let _ = tokio::fs::remove_file(&tmp_path).await;
-                Err(e)
-            }
-        }
-    }
-
-    /// Probe a resource URL for its size and HTTP range support.
-    ///
-    /// Uses a single-byte range request rather than a `HEAD` so that the
-    /// probe works with method-scoped presigned URLs. Returns the total size
-    /// only when the server responds with `206 Partial Content`.
-    async fn probe_download(&self, url: &str) -> Option<u64> {
-        let response = self
-            .http
-            .get(url)
-            .header(reqwest::header::RANGE, "bytes=0-0")
-            .send()
-            .await
-            .ok()?;
-        if response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
-            return None;
-        }
-        let content_range = response
-            .headers()
-            .get(reqwest::header::CONTENT_RANGE)?
-            .to_str()
-            .ok()?;
-        content_range.rsplit('/').next()?.parse::<u64>().ok()
-    }
-
-    /// Download a resource using concurrent range requests, each written at
-    /// its offset into ONE preallocated file. No part files, no assembly
-    /// pass: every byte is written to disk exactly once.
-    async fn download_ranges(
-        &self,
-        url: &str,
-        path: &Path,
-        size: u64,
-        chunk_size: u64,
-        progress: &ChunkProgressFn,
-    ) -> Result<()> {
-        use futures_util::stream::{StreamExt, TryStreamExt};
-        let file = tokio::fs::File::create(path)
-            .await
-            .map_err(|e| MunaError::Prediction(format!("Failed to create file: {e}")))?;
-        file.set_len(size)
-            .await
-            .map_err(|e| MunaError::Prediction(format!("Failed to allocate file: {e}")))?;
-        let file = Arc::new(file.into_std().await);
-        // Build the byte ranges that cover the file.
-        let mut ranges: Vec<(u64, u64)> = Vec::new();
-        let mut start = 0u64;
-        while start < size {
-            let end = (start + chunk_size.max(1)).min(size) - 1;
-            ranges.push((start, end));
-            start = end + 1;
-        }
-        // Download each range concurrently, capping the number of open connections.
-        futures_util::stream::iter(ranges)
-            .map(|(start, end)| {
-                let http = self.http.clone();
-                let url = url.to_string();
-                let file = file.clone();
-                let progress = progress.clone();
-                async move { download_range(&http, &url, start, end, file, &progress).await }
-            })
-            .buffer_unordered(Self::DOWNLOAD_MAX_FILES)
-            .try_collect::<Vec<()>>()
-            .await?;
-        // Durability + writeback bound: the data is on disk before the
-        // rename publishes it, so a multi-file prefetch never leaves tens of
-        // GB of dirty pages behind for the next engine load to fight.
-        let file = Arc::try_unwrap(file).expect("all range tasks finished");
-        sync_file(file).await
+        download(&self.http, url, path, progress, DownloadDurability::Durable).await
     }
 
     /// Upload a resource and return the resource URL.
@@ -672,36 +560,199 @@ impl MunaClient {
         Ok(())
     }
 
-    /// Download a resource to a file over a single connection.
-    async fn download_stream(
-        &self,
-        url: &str,
-        path: &Path,
-        progress: &ChunkProgressFn,
-    ) -> Result<()> {
-        let mut response = self.http.get(url).send().await?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(MunaError::Api {
-                message: format!("Failed to download resource: {status}"),
-                status: status.as_u16(),
-            });
-        }
-        let mut file = tokio::fs::File::create(path)
+}
+
+const DOWNLOAD_CHUNK_SIZE: u64 = 50 * 1024 * 1024; // 50 MB per range request
+const DOWNLOAD_MAX_FILES: usize = 16; // maximum parallel connections
+
+/// When a downloaded file becomes durable relative to when it is published
+/// at its destination path.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DownloadDurability {
+    /// `fsync` before the atomic rename: either the complete file appears
+    /// or nothing does, even across a crash. Right for laptops and any
+    /// cache that outlives the process. [`MunaClient::download`] always
+    /// uses this.
+    #[default]
+    Durable,
+    /// Publish as soon as the bytes are in the page cache and let the
+    /// kernel write back on its own schedule. A crash before writeback can
+    /// leave a same-named file with zero-filled holes, so only use this
+    /// where the cache does not survive a crash (ephemeral fleet nodes).
+    /// Readers see the bytes from page cache either way; this only removes
+    /// the wait for the disk, which on slow volumes dominates the download.
+    Eventual,
+}
+
+/// Download a resource to `path` with the given durability, optionally
+/// reporting progress through a callback (see [`DownloadProgressFn`]).
+///
+/// Range-capable resources are fetched with parallel ranged requests into
+/// ONE preallocated sibling temp file; servers without range support fall
+/// back to a single stream. The temp file is renamed into place on success
+/// and removed on failure, so `path` never holds a partial download while
+/// the process lives. Whether it can hold one after a crash is what
+/// `durability` decides.
+pub async fn download(
+    http: &reqwest::Client,
+    url: &str,
+    path: &Path,
+    progress: Option<DownloadProgressFn>,
+    durability: DownloadDurability,
+) -> Result<()> {
+    download_with(http, url, path, progress, durability, DOWNLOAD_CHUNK_SIZE).await
+}
+
+/// [`download`] with an explicit range size, so tests can drive the
+/// multi-range path with small payloads.
+async fn download_with(
+    http: &reqwest::Client,
+    url: &str,
+    path: &Path,
+    progress: Option<DownloadProgressFn>,
+    durability: DownloadDurability,
+    chunk_size: u64,
+) -> Result<()> {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        tokio::fs::create_dir_all(parent)
             .await
-            .map_err(|e| MunaError::Prediction(format!("Failed to create file: {e}")))?;
-        while let Some(chunk) = response.chunk().await? {
-            file.write_all(&chunk)
-                .await
-                .map_err(|e| MunaError::Prediction(format!("Failed to write chunk: {e}")))?;
-            if let Some(report) = progress {
-                report(chunk.len() as u64);
-            }
+            .map_err(|e| MunaError::Prediction(format!("Failed to create directory: {e}")))?;
+    }
+    let tmp_path = download_temp_path(path);
+    let size = probe_download(http, url).await;
+    // Bind the probed total so the chunk loops report plain increments.
+    let progress: ChunkProgressFn = progress.map(|callback| {
+        Arc::new(move |increment: u64| callback(increment, size))
+            as Arc<dyn Fn(u64) + Send + Sync>
+    });
+    let result = match size {
+        Some(size) => {
+            download_ranges(http, url, &tmp_path, size, chunk_size, &progress, durability).await
         }
-        file.flush()
+        None => download_stream(http, url, &tmp_path, &progress, durability).await,
+    };
+    match result {
+        Ok(()) => tokio::fs::rename(&tmp_path, path).await.map_err(|e| {
+            MunaError::Prediction(format!(
+                "Failed to move resource to {}: {e}",
+                path.display()
+            ))
+        }),
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            Err(e)
+        }
+    }
+}
+
+/// Probe a resource URL for its size and HTTP range support.
+///
+/// Uses a single-byte range request rather than a `HEAD` so that the
+/// probe works with method-scoped presigned URLs. Returns the total size
+/// only when the server responds with `206 Partial Content`.
+async fn probe_download(http: &reqwest::Client, url: &str) -> Option<u64> {
+    let response = http
+        .get(url)
+        .header(reqwest::header::RANGE, "bytes=0-0")
+        .send()
+        .await
+        .ok()?;
+    if response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
+        return None;
+    }
+    let content_range = response
+        .headers()
+        .get(reqwest::header::CONTENT_RANGE)?
+        .to_str()
+        .ok()?;
+    content_range.rsplit('/').next()?.parse::<u64>().ok()
+}
+
+/// Download a resource using concurrent range requests, each written at
+/// its offset into ONE preallocated file. No part files, no assembly
+/// pass: every byte is written to disk exactly once.
+async fn download_ranges(
+    http: &reqwest::Client,
+    url: &str,
+    path: &Path,
+    size: u64,
+    chunk_size: u64,
+    progress: &ChunkProgressFn,
+    durability: DownloadDurability,
+) -> Result<()> {
+    use futures_util::stream::{StreamExt, TryStreamExt};
+    let file = tokio::fs::File::create(path)
+        .await
+        .map_err(|e| MunaError::Prediction(format!("Failed to create file: {e}")))?;
+    file.set_len(size)
+        .await
+        .map_err(|e| MunaError::Prediction(format!("Failed to allocate file: {e}")))?;
+    let file = Arc::new(file.into_std().await);
+    // Build the byte ranges that cover the file.
+    let mut ranges: Vec<(u64, u64)> = Vec::new();
+    let mut start = 0u64;
+    while start < size {
+        let end = (start + chunk_size.max(1)).min(size) - 1;
+        ranges.push((start, end));
+        start = end + 1;
+    }
+    // Download each range concurrently, capping the number of open connections.
+    futures_util::stream::iter(ranges)
+        .map(|(start, end)| {
+            let http = http.clone();
+            let url = url.to_string();
+            let file = file.clone();
+            let progress = progress.clone();
+            async move { download_range(&http, &url, start, end, file, &progress).await }
+        })
+        .buffer_unordered(DOWNLOAD_MAX_FILES)
+        .try_collect::<Vec<()>>()
+        .await?;
+    let file = Arc::try_unwrap(file).expect("all range tasks finished");
+    finish_file(file, durability).await
+}
+
+/// Download a resource to a file over a single connection.
+async fn download_stream(
+    http: &reqwest::Client,
+    url: &str,
+    path: &Path,
+    progress: &ChunkProgressFn,
+    durability: DownloadDurability,
+) -> Result<()> {
+    let mut response = http.get(url).send().await?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(MunaError::Api {
+            message: format!("Failed to download resource: {status}"),
+            status: status.as_u16(),
+        });
+    }
+    let mut file = tokio::fs::File::create(path)
+        .await
+        .map_err(|e| MunaError::Prediction(format!("Failed to create file: {e}")))?;
+    while let Some(chunk) = response.chunk().await? {
+        file.write_all(&chunk)
             .await
-            .map_err(|e| MunaError::Prediction(format!("Failed to flush file: {e}")))?;
-        sync_file(file.into_std().await).await
+            .map_err(|e| MunaError::Prediction(format!("Failed to write chunk: {e}")))?;
+        if let Some(report) = progress {
+            report(chunk.len() as u64);
+        }
+    }
+    file.flush()
+        .await
+        .map_err(|e| MunaError::Prediction(format!("Failed to flush file: {e}")))?;
+    finish_file(file.into_std().await, durability).await
+}
+
+/// Apply the durability policy to a fully written temp file before the
+/// caller renames it into place. `Durable` waits for the disk so the rename
+/// publishes only bytes that survive a crash; `Eventual` publishes at once
+/// and leaves writeback to the kernel.
+async fn finish_file(file: std::fs::File, durability: DownloadDurability) -> Result<()> {
+    match durability {
+        DownloadDurability::Durable => sync_file(file).await,
+        DownloadDurability::Eventual => Ok(()),
     }
 }
 
@@ -1086,7 +1137,7 @@ mod tests {
     }
 
     async fn download_to_temp(base: &str, data: &Arc<Vec<u8>>) -> Vec<u8> {
-        download_to_temp_with(base, data, MunaClient::DOWNLOAD_CHUNK_SIZE).await
+        download_to_temp_with(base, data, DOWNLOAD_CHUNK_SIZE, DownloadDurability::Durable).await
     }
 
     /// Download through the public path with an explicit range size and
@@ -1096,8 +1147,9 @@ mod tests {
         base: &str,
         data: &Arc<Vec<u8>>,
         chunk_size: u64,
+        durability: DownloadDurability,
     ) -> Vec<u8> {
-        let client = MunaClient::new(None, None);
+        let http = reqwest::Client::new();
         let dir = std::env::temp_dir().join(format!(
             "muna-dl-{}",
             std::time::SystemTime::now()
@@ -1107,8 +1159,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("resource.bin");
-        client
-            .download_with(&format!("{base}/resource"), &path, None, chunk_size)
+        download_with(&http, &format!("{base}/resource"), &path, None, durability, chunk_size)
             .await
             .unwrap();
         let downloaded = std::fs::read(&path).unwrap();
@@ -1140,7 +1191,7 @@ mod tests {
         // tail range.
         let data = test_payload(3 * 1024 * 1024 + 12_345);
         let base = start_server(data.clone(), true);
-        assert!(download_to_temp_with(&base, &data, 64 * 1024).await == *data);
+        assert!(download_to_temp_with(&base, &data, 64 * 1024, DownloadDurability::Durable).await == *data);
     }
 
     #[tokio::test]
@@ -1148,7 +1199,7 @@ mod tests {
         // Progress increments across all ranges sum to the probed size.
         let data = test_payload(1024 * 1024 + 7);
         let base = start_server(data.clone(), true);
-        let client = MunaClient::new(None, None);
+        let http = reqwest::Client::new();
         let dir = std::env::temp_dir().join(format!(
             "muna-dl-progress-{}",
             std::time::SystemTime::now()
@@ -1168,10 +1219,16 @@ mod tests {
                 *total.lock().unwrap() = size;
             })
         };
-        client
-            .download_with(&format!("{base}/resource"), &path, Some(progress), 128 * 1024)
-            .await
-            .unwrap();
+        download_with(
+            &http,
+            &format!("{base}/resource"),
+            &path,
+            Some(progress),
+            DownloadDurability::Durable,
+            128 * 1024,
+        )
+        .await
+        .unwrap();
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(reported.load(std::sync::atomic::Ordering::SeqCst), data.len() as u64);
         assert_eq!(*total.lock().unwrap(), Some(data.len() as u64));
@@ -1192,6 +1249,41 @@ mod tests {
         let data = test_payload(2 * 1024 * 1024);
         let base = start_server(data.clone(), false);
         assert!(download_to_temp(&base, &data).await == *data);
+    }
+
+    #[tokio::test]
+    async fn test_download_eventual_durability_publishes_complete_file() {
+        // `Eventual` skips the fsync but must still publish a complete,
+        // byte-identical file with no temp leftover, on both the ranged
+        // and the single-stream paths.
+        let data = test_payload(3 * 1024 * 1024 + 99);
+        let ranged = start_server(data.clone(), true);
+        assert!(download_to_temp_with(&ranged, &data, 256 * 1024, DownloadDurability::Eventual).await == *data);
+        let streamed = start_server(data.clone(), false);
+        assert!(download_to_temp_with(&streamed, &data, 256 * 1024, DownloadDurability::Eventual).await == *data);
+    }
+
+    #[tokio::test]
+    async fn test_client_download_is_durable_and_atomic() {
+        // The inherent method is the durable path; it must behave exactly
+        // like the free function with `Durable`.
+        let data = test_payload(1024 * 1024 + 1);
+        let base = start_server(data.clone(), true);
+        let client = MunaClient::new(None, None);
+        let dir = std::env::temp_dir().join(format!(
+            "muna-dl-durable-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path = dir.join("resource.bin");
+        client.download(&format!("{base}/resource"), &path, None).await.unwrap();
+        let downloaded = std::fs::read(&path).unwrap();
+        let entries = std::fs::read_dir(&dir).unwrap().count();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(entries, 1);
+        assert!(downloaded == *data);
     }
 
     #[tokio::test]
