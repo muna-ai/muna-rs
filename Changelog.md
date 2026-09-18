@@ -1,3 +1,6 @@
+## 0.0.27
+*INCOMPLETE*
+
 ## 0.0.26
 + Added support for Anthropic `thinking` and `output_config.effort` in `muna.beta.anthropic.messages.create`.
 
