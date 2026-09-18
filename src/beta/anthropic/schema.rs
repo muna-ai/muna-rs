@@ -256,6 +256,48 @@ pub struct MessageParam {
     pub content: MessageContent,
 }
 
+/// Extended thinking configuration.
+///
+/// `budget_tokens` and `display` are accepted for wire compatibility and
+/// ignored: Muna predictors expose reasoning as an effort level, not a
+/// token budget. Unknown `type`s deserialize as `Other` so a new Anthropic
+/// variant degrades to "enabled at default effort" instead of a 400.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ThinkingConfig {
+    Disabled,
+    Enabled {
+        budget_tokens: i32,
+        #[serde(default)]
+        display: Option<String>,
+    },
+    Adaptive {
+        #[serde(default)]
+        display: Option<String>,
+    },
+    #[serde(other)]
+    Other,
+}
+
+/// Effort level for the model's output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputEffort {
+    Low,
+    Medium,
+    High,
+    XHigh,
+    Max,
+}
+
+/// Output configuration. `format` is not yet supported and is ignored.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct OutputConfig {
+    /// Effort level.
+    #[serde(default)]
+    pub effort: Option<OutputEffort>,
+}
+
 /// Parameters for creating a message.
 ///
 /// Deserializes from an Anthropic messages request body (unknown fields
@@ -290,6 +332,13 @@ pub struct MessageCreateParams {
     /// Nucleus sampling coefficient.
     #[serde(default)]
     pub top_p: Option<f32>,
+    /// Extended thinking configuration. Mapped to the predictor's
+    /// `reasoning_effort` (see `MessageCreateParams::reasoning_effort`).
+    #[serde(default)]
+    pub thinking: Option<ThinkingConfig>,
+    /// Output configuration (`effort`).
+    #[serde(default)]
+    pub output_config: Option<OutputConfig>,
     /// Prediction acceleration. Not a wire field.
     #[serde(skip)]
     pub acceleration: Option<Acceleration>,

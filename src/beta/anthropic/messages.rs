@@ -11,7 +11,10 @@ use futures_core::Stream;
 use futures_util::StreamExt;
 use tokio::sync::RwLock;
 
-use crate::beta::openai::{bind_chat_inputs, ChatCompletionChunk, ChatInputs};
+use crate::beta::openai::{
+    bind_chat_inputs, ChatCompletionChunk, ChatCompletionReasoningEffort,
+    ChatInputs,
+};
 use crate::client::Result;
 use crate::MunaError;
 use crate::services::{PredictionService, PredictorService};
@@ -20,7 +23,8 @@ use crate::types::{Acceleration, Dtype, Prediction, Signature, Value};
 use super::schema::{
     ContentBlock, ContentBlockDelta, ContentBlockParam, Message,
     MessageContent, MessageCreateParams, MessageDelta, MessageParam,
-    RawMessageStreamEvent, StopReason, Tool, Usage,
+    OutputEffort, RawMessageStreamEvent, StopReason, ThinkingConfig,
+    Tool, Usage,
 };
 
 /// Stream of raw message stream events.
@@ -170,6 +174,35 @@ impl MessageService {
 
 impl MessageCreateParams {
 
+    /// Reasoning effort the predictor receives, derived from Anthropic's
+    /// `thinking` and `output_config.effort`:
+    /// - `thinking.type == "disabled"`            -> `none`
+    /// - effort given (thinking absent/enabled)   -> that effort, `max` -> `xhigh`
+    /// - thinking enabled/adaptive, no effort     -> `medium`
+    /// - neither                                  -> `None` (predictor default)
+    pub fn reasoning_effort(&self) -> Option<ChatCompletionReasoningEffort> {
+        use ChatCompletionReasoningEffort as E;
+        if matches!(self.thinking, Some(ThinkingConfig::Disabled)) {
+            return Some(E::None);
+        }
+        let effort = self
+            .output_config
+            .as_ref()
+            .and_then(|config| config.effort)
+            .map(|effort| match effort {
+                OutputEffort::Low    => E::Low,
+                OutputEffort::Medium => E::Medium,
+                OutputEffort::High   => E::High,
+                OutputEffort::XHigh  => E::XHigh,
+                OutputEffort::Max    => E::XHigh,
+            });
+        match (effort, &self.thinking) {
+            (Some(effort), _) => Some(effort),
+            (None, Some(_)) => Some(E::Medium),
+            (None, None) => None,
+        }
+    }
+
     /// Inputs the chat predictor receives for this request: the system
     /// prompt folded into OpenAI-shaped messages, tools translated to
     /// OpenAI function tools (`None` when absent or empty), and sampling
@@ -200,7 +233,7 @@ impl MessageCreateParams {
                 .filter(|tools| !tools.is_empty())
                 .map(to_openai_tools),
             response_format: None,
-            reasoning_effort: None,
+            reasoning_effort: self.reasoning_effort().map(|e| e.as_str().to_string()),
             max_output_tokens: Some(self.max_tokens),
             temperature: self.temperature,
             top_p: self.top_p,
@@ -973,6 +1006,53 @@ mod tests {
             "tools": [],
         })).unwrap();
         assert_eq!(params.chat_inputs().unwrap().tools, None);
+    }
+
+    #[test]
+    fn chat_inputs_map_thinking_to_reasoning_effort() {
+        fn effort(extra: serde_json::Value) -> Option<String> {
+            let mut body = serde_json::json!({
+                "model": "@a/x",
+                "max_tokens": 4096,
+                "messages": [{ "role": "user", "content": "hi" }],
+            });
+            body.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            let params: MessageCreateParams = serde_json::from_value(body).unwrap();
+            params.chat_inputs().unwrap().reasoning_effort
+        }
+        // Explicitly disabled thinking turns reasoning off.
+        assert_eq!(
+            effort(serde_json::json!({ "thinking": { "type": "disabled" } })),
+            Some("none".to_string())
+        );
+        // Enabled with a budget (Claude Code's shape): budget is ignored,
+        // reasoning is on at the default level.
+        assert_eq!(
+            effort(serde_json::json!({
+                "thinking": { "type": "enabled", "budget_tokens": 4096 },
+            })),
+            Some("medium".to_string())
+        );
+        // Adaptive thinking with an explicit effort; `max` clamps to `xhigh`.
+        assert_eq!(
+            effort(serde_json::json!({
+                "thinking": { "type": "adaptive", "display": "omitted" },
+                "output_config": { "effort": "max" },
+            })),
+            Some("xhigh".to_string())
+        );
+        // Effort alone implies thinking at that level.
+        assert_eq!(
+            effort(serde_json::json!({ "output_config": { "effort": "low" } })),
+            Some("low".to_string())
+        );
+        // Neither: leave the predictor's default alone.
+        assert_eq!(effort(serde_json::json!({})), None);
+        // Unknown future thinking types degrade to "enabled" instead of a 400.
+        assert_eq!(
+            effort(serde_json::json!({ "thinking": { "type": "telepathic" } })),
+            Some("medium".to_string())
+        );
     }
 
     #[test]
