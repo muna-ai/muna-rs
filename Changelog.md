@@ -1,3 +1,6 @@
+## 0.0.28
+*INCOMPLETE*
+
 ## 0.0.27
 + Added `Parameter::context_length` field for the maximum context length in tokens of a chat message parameter.
 + Added `muna.beta.openai.models.retrieve` method, returning the OpenAI `Model` object for a compiled model.
