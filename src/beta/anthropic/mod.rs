@@ -4,9 +4,11 @@
 */
 
 mod messages;
+mod models;
 mod schema;
 
 pub use messages::*;
+pub use models::*;
 pub use schema::*;
 
 use crate::services::{PredictionService, PredictorService};
@@ -16,6 +18,8 @@ use crate::services::{PredictionService, PredictorService};
 pub struct AnthropicClient {
     /// Messages service.
     pub messages: MessageService,
+    /// Models service.
+    pub models: ModelService,
 }
 
 impl AnthropicClient {
@@ -24,7 +28,8 @@ impl AnthropicClient {
         predictors: PredictorService,
         predictions: PredictionService
     ) -> Self {
-        let messages = MessageService::new(predictors, predictions);
-        Self { messages }
+        let messages = MessageService::new(predictors.clone(), predictions);
+        let models = ModelService::new(predictors);
+        Self { messages, models }
     }
 }

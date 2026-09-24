@@ -41,6 +41,9 @@ pub struct Parameter {
     /// Audio sample rate in Hertz.
     #[serde(default)]
     pub sample_rate: Option<u32>,
+    /// Maximum context length in tokens for chat message parameters.
+    #[serde(default)]
+    pub context_length: Option<u32>,
     /// Batch configuration for list parameters.
     #[serde(default)]
     pub batch: Option<BatchConfig>,
@@ -84,4 +87,27 @@ pub struct BatchConfig {
     /// Batch capacity. Required for `static` and `dynamic` modes.
     #[serde(default, alias = "max_count", alias = "maxCount", skip_serializing_if = "Option::is_none")]
     pub capacity: Option<usize>,
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn context_length_round_trips_camel_case() {
+        let param: Parameter = serde_json::from_str(r#"{
+            "name": "messages",
+            "dtype": "list",
+            "denotation": "openai.chat.completions.messages",
+            "contextLength": 262144
+        }"#).unwrap();
+        assert_eq!(param.context_length, Some(262_144));
+        let json = serde_json::to_value(&param).unwrap();
+        assert_eq!(json["contextLength"], 262_144);
+    }
+
+    #[test]
+    fn context_length_defaults_to_none() {
+        let param: Parameter = serde_json::from_str(r#"{ "name": "x", "dtype": "int32" }"#).unwrap();
+        assert!(param.context_length.is_none());
+    }
 }

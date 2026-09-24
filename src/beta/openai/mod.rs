@@ -8,6 +8,7 @@ mod completions;
 mod embeddings;
 mod images;
 mod inputs;
+mod models;
 mod schema;
 
 pub use chat::*;
@@ -15,6 +16,7 @@ pub use completions::*;
 pub use embeddings::*;
 pub use images::*;
 pub use inputs::*;
+pub use models::*;
 pub use schema::*;
 
 use std::sync::Arc;
@@ -31,6 +33,8 @@ pub struct OpenAIClient {
     pub embeddings: EmbeddingService,
     /// Image generation service.
     pub images: ImageService,
+    /// Models service.
+    pub models: ModelService,
 }
 
 impl OpenAIClient {
@@ -42,7 +46,8 @@ impl OpenAIClient {
     ) -> Self {
         let chat = ChatService::new(client, predictors.clone(), predictions.clone());
         let embeddings = EmbeddingService::new(predictors.clone(), predictions.clone());
-        let images = ImageService::new(predictors, predictions);
-        Self { chat, embeddings, images }
+        let images = ImageService::new(predictors.clone(), predictions);
+        let models = ModelService::new(predictors);
+        Self { chat, embeddings, images, models }
     }
 }

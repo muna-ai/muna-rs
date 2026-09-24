@@ -1,5 +1,7 @@
 ## 0.0.27
-*INCOMPLETE*
++ Added `Parameter::context_length` field for the maximum context length in tokens of a chat message parameter.
++ Added `muna.beta.openai.models.retrieve` method, returning the OpenAI `Model` object for a compiled model.
++ Added `muna.beta.anthropic.models.retrieve` method, returning the Anthropic `ModelInfo` object for a compiled model.
 
 ## 0.0.26
 + Added support for Anthropic `thinking` and `output_config.effort` in `muna.beta.anthropic.messages.create`.
