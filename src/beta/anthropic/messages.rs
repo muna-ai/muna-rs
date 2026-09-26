@@ -223,6 +223,7 @@ impl MessageCreateParams {
             ));
         }
         for (index, message) in self.messages.iter().enumerate() {
+            validate_blocks(index, message)?;
             validate_message(index, message)?;
         }
         Ok(ChatInputs {
@@ -244,6 +245,28 @@ impl MessageCreateParams {
             top_k: self.top_k,
         })
     }
+}
+
+/// Reject content blocks the chat surface cannot translate. Dropping them
+/// silently would have the model answer without content the user sent.
+fn validate_blocks(index: usize, message: &MessageParam) -> Result<()> {
+    let MessageContent::Blocks(blocks) = &message.content else {
+        return Ok(());
+    };
+    for (block_index, block) in blocks.iter().enumerate() {
+        let kind = match block {
+            ContentBlockParam::Image        => "an `image` block",
+            ContentBlockParam::Document     => "a `document` block",
+            ContentBlockParam::Unsupported  => "a block of an unrecognized type",
+            _                               => continue,
+        };
+        return Err(MunaError::InvalidInput(format!(
+            "`messages[{index}].content[{block_index}]` is {kind}, which is not \
+            supported. Supported block types are `text`, `tool_use`, \
+            `tool_result`, `thinking`, and `redacted_thinking`."
+        )));
+    }
+    Ok(())
 }
 
 /// Reject a message that carries nothing for the model to read.
@@ -276,6 +299,8 @@ fn validate_message(index: usize, message: &MessageParam) -> Result<()> {
         MessageContent::Blocks(blocks) => blocks.iter().any(|block| match block {
             ContentBlockParam::Text { text } => !text.trim().is_empty(),
             ContentBlockParam::ToolUse { .. } | ContentBlockParam::ToolResult { .. } => true,
+            ContentBlockParam::Thinking { .. } | ContentBlockParam::RedactedThinking { .. } => false,
+            ContentBlockParam::Image | ContentBlockParam::Document | ContentBlockParam::Unsupported => true,
         }),
     };
     if has_payload {
@@ -422,6 +447,11 @@ fn translate_message_for_openai(
                     "content": content.as_ref().map(|c| c.flatten()),
                 }));
             }
+            ContentBlockParam::Thinking { .. }
+            | ContentBlockParam::RedactedThinking { .. }
+            | ContentBlockParam::Image
+            | ContentBlockParam::Document
+            | ContentBlockParam::Unsupported => {}
         }
     }
     flush(&mut text_run, messages);
@@ -1100,6 +1130,68 @@ mod tests {
         ])).unwrap();
         assert_eq!(inputs.messages[1]["role"], serde_json::json!("assistant"));
         assert_eq!(inputs.messages[1]["content"], serde_json::json!(""));
+    }
+
+    #[test]
+    fn replayed_response_content_is_accepted() {
+        // Anthropic SDKs append the prior response's content verbatim, so
+        // everything we emit must parse as input on the next turn.
+        let reply = serde_json::to_value(vec![
+            ContentBlock::Thinking {
+                thinking: "The user said hello.".into(),
+                signature: String::new(),
+            },
+            ContentBlock::Text { text: "Hey! What can I help with?".into() },
+        ]).unwrap();
+        let params: MessageCreateParams = serde_json::from_value(serde_json::json!({
+            "model": "@a/x",
+            "max_tokens": 64,
+            "messages": [
+                { "role": "user", "content": "hello" },
+                { "role": "assistant", "content": reply },
+                { "role": "assistant", "content": [
+                    { "type": "redacted_thinking", "data": "opaque" }
+                ] },
+                { "role": "user", "content": "Is this folder please" },
+            ],
+        })).unwrap();
+        let inputs = params.chat_inputs().unwrap();
+        // Thinking is dropped; the text stays on the assistant turn, and the
+        // redacted-only turn emits nothing.
+        assert_eq!(inputs.messages, vec![
+            serde_json::json!({ "role": "user", "content": "hello" }),
+            serde_json::json!({ "role": "assistant", "content": "Hey! What can I help with?" }),
+            serde_json::json!({ "role": "user", "content": "Is this folder please" }),
+        ]);
+    }
+
+    #[test]
+    fn unsupported_blocks_are_rejected_by_name() {
+        fn error(block: serde_json::Value) -> String {
+            let params: MessageCreateParams = serde_json::from_value(serde_json::json!({
+                "model": "@a/x",
+                "max_tokens": 64,
+                "messages": [{ "role": "user", "content": [
+                    { "type": "text", "text": "what is this?" },
+                    block
+                ] }],
+            })).unwrap();
+            let error = params.chat_inputs().unwrap_err();
+            assert!(matches!(error, MunaError::InvalidInput(_)), "{error}");
+            error.to_string()
+        }
+        let image = error(serde_json::json!({
+            "type": "image",
+            "source": { "type": "base64", "media_type": "image/png", "data": "AAAA" }
+        }));
+        assert!(image.contains("messages[0].content[1]") && image.contains("`image`"), "{image}");
+        let document = error(serde_json::json!({
+            "type": "document",
+            "source": { "type": "text", "media_type": "text/plain", "data": "hi" }
+        }));
+        assert!(document.contains("`document`"), "{document}");
+        let unknown = error(serde_json::json!({ "type": "search_result", "title": "t" }));
+        assert!(unknown.contains("unrecognized type"), "{unknown}");
     }
 
     #[test]

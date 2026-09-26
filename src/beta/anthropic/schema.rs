@@ -214,6 +214,26 @@ pub enum ContentBlockParam {
         #[serde(default)]
         is_error: Option<bool>,
     },
+    /// Thinking block replayed from a prior assistant turn.
+    Thinking {
+        /// Reasoning contents.
+        thinking: String,
+        /// Signature verifying the thinking block. Empty for Muna predictions.
+        #[serde(default)]
+        signature: String,
+    },
+    /// Redacted thinking block replayed from a prior assistant turn.
+    RedactedThinking {
+        /// Encrypted reasoning contents.
+        data: String,
+    },
+    /// Image block. Parsed only so it can be rejected by name.
+    Image,
+    /// Document block. Parsed only so it can be rejected by name.
+    Document,
+    /// Any other block type. Parsed so the request fails with a named error.
+    #[serde(other)]
+    Unsupported,
 }
 
 /// Input message content, either a string or a list of content blocks.

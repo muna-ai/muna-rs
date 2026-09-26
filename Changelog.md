@@ -1,5 +1,6 @@
 ## 0.0.28
-*INCOMPLETE*
++ Fixed Anthropic-compatible client rejecting `thinking` and `redacted_thinking` blocks replayed from prior assistant turns, which broke every multi-turn conversation with a thinking model.
++ Updated Anthropic-compatible client to reject `image`, `document`, and unrecognized content blocks with an `InvalidInput` error naming the block, instead of an opaque deserialization error.
 
 ## 0.0.27
 + Added `Parameter::context_length` field for the maximum context length in tokens of a chat message parameter.
