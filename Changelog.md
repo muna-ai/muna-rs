@@ -1,3 +1,6 @@
+## 0.0.29
+*INCOMPLETE*
+
 ## 0.0.28
 + Fixed Anthropic-compatible client rejecting `thinking` and `redacted_thinking` blocks replayed from prior assistant turns, which broke every multi-turn conversation with a thinking model.
 + Updated Anthropic-compatible client to reject `image`, `document`, and unrecognized content blocks with an `InvalidInput` error naming the block, instead of an opaque deserialization error.
