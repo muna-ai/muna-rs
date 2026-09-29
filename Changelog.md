@@ -1,3 +1,6 @@
+## 0.0.30
+*INCOMPLETE*
+
 ## 0.0.29
 + Added support for `image` blocks with `base64` sources in `muna.beta.anthropic.messages.create`.
 + Updated OpenAI- and Anthropic-compatible clients to reject image content with an `InvalidInput` error when the model does not declare an images parameter.
