@@ -1,5 +1,7 @@
 ## 0.0.29
-*INCOMPLETE*
++ Added support for `image` blocks with `base64` sources in `muna.beta.anthropic.messages.create`.
++ Updated OpenAI- and Anthropic-compatible clients to reject image content with an `InvalidInput` error when the model does not declare an images parameter.
++ Removed support for remote image URLs in OpenAI- and Anthropic-compatible clients. Fetch remote images and pass them inline as `data:` URLs (OpenAI) or `base64` sources (Anthropic).
 
 ## 0.0.28
 + Fixed Anthropic-compatible client rejecting `thinking` and `redacted_thinking` blocks replayed from prior assistant turns, which broke every multi-turn conversation with a thinking model.

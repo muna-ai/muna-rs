@@ -3,9 +3,6 @@
 *   Copyright © 2026 NatML Inc. All Rights Reserved.
 */
 
-use std::sync::Arc;
-
-use crate::client::Client;
 use crate::services::{PredictionService, PredictorService};
 
 use super::ChatCompletionService;
@@ -20,12 +17,11 @@ pub struct ChatService {
 impl ChatService {
 
     pub fn new(
-        client: Arc<dyn Client>,
         predictors: PredictorService,
         predictions: PredictionService
     ) -> Self {
         Self {
-            completions: ChatCompletionService::new(client, predictors, predictions),
+            completions: ChatCompletionService::new(predictors, predictions),
         }
     }
 }

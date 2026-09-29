@@ -12,16 +12,16 @@ use futures_util::StreamExt;
 use tokio::sync::RwLock;
 
 use crate::beta::openai::{
-    bind_chat_inputs, ChatCompletionChunk, ChatCompletionReasoningEffort,
-    ChatInputs,
+    bind_chat_inputs, decode_base64_image, ChatCompletionChunk,
+    ChatCompletionReasoningEffort, ChatInputs,
 };
 use crate::client::Result;
 use crate::MunaError;
 use crate::services::{PredictionService, PredictorService};
-use crate::types::{Acceleration, Dtype, Prediction, Signature, Value};
+use crate::types::{self, Acceleration, Dtype, Prediction, Signature, Value};
 
 use super::schema::{
-    ContentBlock, ContentBlockDelta, ContentBlockParam, Message,
+    ContentBlock, ContentBlockDelta, ContentBlockParam, ImageSource, Message,
     MessageContent, MessageCreateParams, MessageDelta, MessageParam,
     OutputEffort, RawMessageStreamEvent, StopReason, ThinkingConfig,
     Tool, Usage,
@@ -103,7 +103,7 @@ impl MessageService {
 
     async fn prepare_prediction(
         &self,
-        params: MessageCreateParams,
+        mut params: MessageCreateParams,
     ) -> Result<(HashMap<String, Value>, usize, Acceleration)> {
         self.ensure_delegate_info(&params.model).await?;
         let info = {
@@ -116,8 +116,12 @@ impl MessageService {
                 ))
             })?
         };
-        let input_map = bind_chat_inputs(params.chat_inputs()?, &info.signature)?;
-        let acceleration = params.acceleration.unwrap_or(Acceleration::LocalAuto);
+        let acceleration = params.acceleration.take().unwrap_or(Acceleration::LocalAuto);
+        // Image decoding is CPU-bound (tens of milliseconds per image).
+        let inputs = tokio::task::spawn_blocking(move || params.chat_inputs())
+            .await
+            .map_err(|e| MunaError::Prediction(format!("Failed to prepare chat inputs: {e}")))??;
+        let input_map = bind_chat_inputs(inputs, &info.signature)?;
         Ok((input_map, info.output_param_idx, acceleration))
     }
 
@@ -214,20 +218,35 @@ impl MessageCreateParams {
     /// the OpenAI contract, so this is the whole Anthropic adaptation of the
     /// request; servers and the control plane's router-hash path both call it.
     ///
+    /// Image blocks must have `base64` sources: they are decoded here into
+    /// `images`, in block order, without any network access. Decoding is
+    /// CPU-bound (tens of milliseconds per large image), so async callers
+    /// should run this off the executor.
+    ///
     /// Fails with `InvalidInput` when a message carries nothing for the model
-    /// to read (see `validate_message`).
+    /// to read (see `validate_message`) or content the chat surface cannot
+    /// translate (see `validate_blocks`).
     pub fn chat_inputs(&self) -> Result<ChatInputs> {
         if self.messages.is_empty() {
             return Err(MunaError::InvalidInput(
                 "`messages` must contain at least one message.".into(),
             ));
         }
+        if let Some(MessageContent::Blocks(blocks)) = &self.system {
+            if blocks.iter().any(|block| matches!(block, ContentBlockParam::Image { .. })) {
+                return Err(MunaError::InvalidInput(
+                    "`system` content cannot contain `image` blocks.".into(),
+                ));
+            }
+        }
         for (index, message) in self.messages.iter().enumerate() {
             validate_blocks(index, message)?;
             validate_message(index, message)?;
         }
+        let images = decode_images(&self.messages)?;
         Ok(ChatInputs {
             messages: to_openai_messages(self.system.as_ref(), &self.messages),
+            images: (!images.is_empty()).then_some(images),
             tools: self
                 .tools
                 .as_deref()
@@ -249,24 +268,87 @@ impl MessageCreateParams {
 
 /// Reject content blocks the chat surface cannot translate. Dropping them
 /// silently would have the model answer without content the user sent.
+///
+/// Images are accepted only where `translate_message_for_openai` emits an
+/// image placeholder for them: top-level blocks of user and assistant
+/// turns. System turns and tool results are flattened to text, so an image
+/// there would decode without a placeholder to bind to.
 fn validate_blocks(index: usize, message: &MessageParam) -> Result<()> {
     let MessageContent::Blocks(blocks) = &message.content else {
         return Ok(());
     };
     for (block_index, block) in blocks.iter().enumerate() {
+        let location = format!("`messages[{index}].content[{block_index}]`");
         let kind = match block {
-            ContentBlockParam::Image        => "an `image` block",
+            ContentBlockParam::Image { .. } if message.role == "system" => {
+                return Err(MunaError::InvalidInput(format!(
+                    "{location} is an `image` block in a `system` message, which \
+                    is not supported."
+                )));
+            }
+            ContentBlockParam::Image { source } => {
+                validate_image_source(&location, source)?;
+                continue;
+            }
+            ContentBlockParam::ToolResult { content: Some(content), .. } => {
+                if let MessageContent::Blocks(inner) = content.as_ref() {
+                    if inner.iter().any(|block| matches!(block, ContentBlockParam::Image { .. })) {
+                        return Err(MunaError::InvalidInput(format!(
+                            "{location} is a `tool_result` block with `image` \
+                            content, which is not supported."
+                        )));
+                    }
+                }
+                continue;
+            }
             ContentBlockParam::Document     => "a `document` block",
             ContentBlockParam::Unsupported  => "a block of an unrecognized type",
             _                               => continue,
         };
         return Err(MunaError::InvalidInput(format!(
-            "`messages[{index}].content[{block_index}]` is {kind}, which is not \
-            supported. Supported block types are `text`, `tool_use`, \
-            `tool_result`, `thinking`, and `redacted_thinking`."
+            "{location} is {kind}, which is not supported. Supported block types \
+            are `text`, `image`, `tool_use`, `tool_result`, `thinking`, and \
+            `redacted_thinking`."
         )));
     }
     Ok(())
+}
+
+/// Accept only inline `base64` image sources: the client never fetches.
+fn validate_image_source(
+    location: &str,
+    source: &ImageSource
+) -> Result<()> {
+    let kind = match source {
+        ImageSource::Base64 { .. } => return Ok(()),
+        ImageSource::Url { .. } => "a `url` source",
+        ImageSource::Unsupported => "an unsupported source",
+    };
+    Err(MunaError::InvalidInput(format!(
+        "{location} is an `image` block with {kind}. Only `base64` image sources \
+        are supported; fetch remote images and pass them inline as `base64`."
+    )))
+}
+
+/// Decode the conversation's image blocks in the order
+/// `translate_message_for_openai` emits their placeholders. Assumes
+/// `validate_blocks` passed, so every image is a top-level `base64` block
+/// of a non-system turn.
+fn decode_images(messages: &[MessageParam]) -> Result<Vec<types::Image>> {
+    messages
+        .iter()
+        .filter_map(|message| match &message.content {
+            MessageContent::Blocks(blocks) => Some(blocks.iter()),
+            MessageContent::Text(_) => None,
+        })
+        .flatten()
+        .filter_map(|block| match block {
+            ContentBlockParam::Image {
+                source: ImageSource::Base64 { media_type, data },
+            } => Some(decode_base64_image(data, media_type)),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Reject a message that carries nothing for the model to read.
@@ -300,7 +382,9 @@ fn validate_message(index: usize, message: &MessageParam) -> Result<()> {
             ContentBlockParam::Text { text } => !text.trim().is_empty(),
             ContentBlockParam::ToolUse { .. } | ContentBlockParam::ToolResult { .. } => true,
             ContentBlockParam::Thinking { .. } | ContentBlockParam::RedactedThinking { .. } => false,
-            ContentBlockParam::Image | ContentBlockParam::Document | ContentBlockParam::Unsupported => true,
+            ContentBlockParam::Image { .. }
+            | ContentBlockParam::Document
+            | ContentBlockParam::Unsupported => true,
         }),
     };
     if has_payload {
@@ -396,11 +480,20 @@ fn openai_tool(tool: &Tool) -> serde_json::Value {
     })
 }
 
+/// Content block that stays on the message's own role.
+enum RunPart<'a> {
+    Text(&'a str),
+    Image,
+}
+
 /// Translate one Anthropic input message into OpenAI-shaped messages.
 /// Text blocks stay on the original role (flattened, joined by newline);
-/// replayed `tool_use` blocks become assistant `tool_calls`; `tool_result`
-/// blocks become `tool` role messages bound by `tool_call_id`. Block order
-/// is preserved by flushing the pending text run before each tool block.
+/// image blocks stay on it too, as payload-free `{"type": "image"}` parts
+/// (the nth placeholder across the conversation indexes the nth decoded
+/// image), which keeps a run with images as a content-part list. Replayed
+/// `tool_use` blocks become assistant `tool_calls`; `tool_result` blocks
+/// become `tool` role messages bound by `tool_call_id`. Block order is
+/// preserved by flushing the pending run before each tool block.
 fn translate_message_for_openai(
     message: &MessageParam,
     messages: &mut Vec<serde_json::Value>
@@ -412,23 +505,46 @@ fn translate_message_for_openai(
         }));
         return;
     };
-    let mut text_run: Vec<&str> = Vec::new();
-    let flush = |text_run: &mut Vec<&str>, messages: &mut Vec<serde_json::Value>| {
-        if !text_run.is_empty() {
-            messages.push(serde_json::json!({
-                "role": message.role,
-                "content": text_run.join("\n"),
-            }));
-            text_run.clear();
+    let mut run: Vec<RunPart> = Vec::new();
+    let flush = |run: &mut Vec<RunPart>, messages: &mut Vec<serde_json::Value>| {
+        if run.is_empty() {
+            return;
         }
+        let content = if run.iter().any(|part| matches!(part, RunPart::Image)) {
+            serde_json::Value::Array(
+                run.iter()
+                    .map(|part| match part {
+                        RunPart::Text(text) => serde_json::json!({ "type": "text", "text": text }),
+                        RunPart::Image => serde_json::json!({ "type": "image" }),
+                    })
+                    .collect()
+            )
+        } else {
+            let texts: Vec<&str> = run
+                .iter()
+                .filter_map(|part| match part {
+                    RunPart::Text(text) => Some(*text),
+                    RunPart::Image => None,
+                })
+                .collect();
+            serde_json::Value::String(texts.join("\n"))
+        };
+        messages.push(serde_json::json!({
+            "role": message.role,
+            "content": content,
+        }));
+        run.clear();
     };
     for block in blocks {
         match block {
             ContentBlockParam::Text { text } => {
-                text_run.push(text.as_str());
+                run.push(RunPart::Text(text.as_str()));
+            }
+            ContentBlockParam::Image { .. } => {
+                run.push(RunPart::Image);
             }
             ContentBlockParam::ToolUse { id, name, input } => {
-                flush(&mut text_run, messages);
+                flush(&mut run, messages);
                 messages.push(serde_json::json!({
                     "role": "assistant",
                     "content": null,
@@ -440,7 +556,7 @@ fn translate_message_for_openai(
                 }));
             }
             ContentBlockParam::ToolResult { tool_use_id, content, .. } => {
-                flush(&mut text_run, messages);
+                flush(&mut run, messages);
                 messages.push(serde_json::json!({
                     "role": "tool",
                     "tool_call_id": tool_use_id,
@@ -449,12 +565,11 @@ fn translate_message_for_openai(
             }
             ContentBlockParam::Thinking { .. }
             | ContentBlockParam::RedactedThinking { .. }
-            | ContentBlockParam::Image
             | ContentBlockParam::Document
             | ContentBlockParam::Unsupported => {}
         }
     }
-    flush(&mut text_run, messages);
+    flush(&mut run, messages);
 }
 
 /// Kind of content block being streamed.
@@ -1165,6 +1280,72 @@ mod tests {
         ]);
     }
 
+    /// 2x2 solid-red RGBA PNG.
+    const RED_PNG_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFUlEQVR4nGP8z8Dwn4GBgYEJRIAwAB8XAgICR7MUAAAAAElFTkSuQmCC";
+
+    fn image_block() -> serde_json::Value {
+        serde_json::json!({
+            "type": "image",
+            "source": { "type": "base64", "media_type": "image/png", "data": RED_PNG_B64 }
+        })
+    }
+
+    #[test]
+    fn base64_images_become_ordered_placeholders() {
+        let params: MessageCreateParams = serde_json::from_value(serde_json::json!({
+            "model": "@a/x",
+            "max_tokens": 64,
+            "messages": [
+                { "role": "user", "content": [
+                    image_block(),
+                    { "type": "text", "text": "what is this?" }
+                ] },
+                { "role": "assistant", "content": "A red square." },
+                { "role": "user", "content": [
+                    { "type": "text", "text": "and this?" },
+                    image_block(),
+                    { "type": "text", "text": "same?" }
+                ] },
+            ],
+        })).unwrap();
+        let inputs = params.chat_inputs().unwrap();
+        let images = inputs.images.unwrap();
+        assert_eq!(images.len(), 2);
+        assert_eq!((images[0].width, images[0].height), (2, 2));
+        assert_eq!(inputs.messages, vec![
+            serde_json::json!({ "role": "user", "content": [
+                { "type": "image" },
+                { "type": "text", "text": "what is this?" },
+            ] }),
+            serde_json::json!({ "role": "assistant", "content": "A red square." }),
+            serde_json::json!({ "role": "user", "content": [
+                { "type": "text", "text": "and this?" },
+                { "type": "image" },
+                { "type": "text", "text": "same?" },
+            ] }),
+        ]);
+    }
+
+    #[test]
+    fn images_outside_user_turns_are_rejected() {
+        let system: MessageCreateParams = serde_json::from_value(serde_json::json!({
+            "model": "@a/x",
+            "max_tokens": 64,
+            "system": [image_block()],
+            "messages": [{ "role": "user", "content": "hi" }],
+        })).unwrap();
+        assert!(matches!(system.chat_inputs(), Err(MunaError::InvalidInput(m)) if m.contains("`system`")));
+        let inline_system: MessageCreateParams = serde_json::from_value(serde_json::json!({
+            "model": "@a/x",
+            "max_tokens": 64,
+            "messages": [
+                { "role": "system", "content": [image_block()] },
+                { "role": "user", "content": "hi" },
+            ],
+        })).unwrap();
+        assert!(matches!(inline_system.chat_inputs(), Err(MunaError::InvalidInput(m)) if m.contains("`system`")));
+    }
+
     #[test]
     fn unsupported_blocks_are_rejected_by_name() {
         fn error(block: serde_json::Value) -> String {
@@ -1180,11 +1361,25 @@ mod tests {
             assert!(matches!(error, MunaError::InvalidInput(_)), "{error}");
             error.to_string()
         }
-        let image = error(serde_json::json!({
+        let url = error(serde_json::json!({
             "type": "image",
-            "source": { "type": "base64", "media_type": "image/png", "data": "AAAA" }
+            "source": { "type": "url", "url": "https://example.com/cat.png" }
         }));
-        assert!(image.contains("messages[0].content[1]") && image.contains("`image`"), "{image}");
+        assert!(url.contains("messages[0].content[1]") && url.contains("`url` source"), "{url}");
+        let file = error(serde_json::json!({
+            "type": "image",
+            "source": { "type": "file", "file_id": "file_123" }
+        }));
+        assert!(file.contains("unsupported source"), "{file}");
+        let tool_result_image = error(serde_json::json!({
+            "type": "tool_result",
+            "tool_use_id": "t1",
+            "content": [{
+                "type": "image",
+                "source": { "type": "base64", "media_type": "image/png", "data": RED_PNG_B64 }
+            }]
+        }));
+        assert!(tool_result_image.contains("`tool_result`"), "{tool_result_image}");
         let document = error(serde_json::json!({
             "type": "document",
             "source": { "type": "text", "media_type": "text/plain", "data": "hi" }

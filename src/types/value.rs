@@ -96,7 +96,7 @@ pub struct Tensor {
 }
 
 /// Image value.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Image {
     /// Pixel buffer (RGBA or RGB).
     pub data: Vec<u8>,

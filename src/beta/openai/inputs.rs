@@ -27,20 +27,28 @@ use std::collections::HashMap;
 use crate::client::Result;
 use crate::MunaError;
 use crate::beta::utils::get_parameter;
-use crate::types::{Dtype, Parameter, Signature, Value};
+use crate::types::{self, Dtype, Parameter, Signature, Value};
 
 /// What a chat predictor receives from a request, before parameter-name
-/// binding and media decoding: the typed mirror of the chat denotation
-/// vocabulary (`openai.chat.completions.*`, `anthropic.messages.*`).
+/// binding: the typed mirror of the chat denotation vocabulary
+/// (`openai.chat.completions.*`, `anthropic.messages.*`).
 ///
-/// Every input a chat predictor can receive without I/O lives here; media
-/// stay out (decoding is the client's job, and the control plane must
-/// never fetch URLs). Fields a surface cannot express stay `None`
-/// (e.g. `top_k` on OpenAI requests, `reasoning_effort` on Anthropic).
+/// Every input a chat predictor can receive without I/O lives here.
+/// Images are decoded from inline payloads only (`data:` URLs, Anthropic
+/// `base64` sources); callers fetch remote images and inline them first,
+/// so building these inputs never touches the network. Audio is not here
+/// yet: the OpenAI client still decodes it at prediction time. Fields a
+/// surface cannot express stay `None` (e.g. `top_k` on OpenAI requests,
+/// `reasoning_effort` on Anthropic).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ChatInputs {
     /// Conversation for the predictor's messages input.
     pub messages: Vec<serde_json::Value>,
+    /// Decoded images for the predictor's images input
+    /// (`openai.chat.completions.images`), in order of appearance across
+    /// the conversation: the nth `{"type": "image"}` placeholder in
+    /// `messages` is the nth entry. `None` when the request has no images.
+    pub images: Option<Vec<types::Image>>,
     /// Tools for the predictor's tools input; `None` when the request
     /// carries no tools (absent or empty).
     pub tools: Option<Vec<serde_json::Value>>,
@@ -82,9 +90,9 @@ const INT_DTYPES: &[Dtype] = &[
 ///
 /// The predictor's sole required input, which must be a `list`, receives
 /// `messages`. Every other field binds to the input carrying its
-/// denotation. Tools present with no denoted tools parameter is a caller
-/// error (`InvalidInput`): the request asked for something the model cannot
-/// do. Any other knob without a matching parameter is dropped: sampling
+/// denotation. Tools or images present with no denoted parameter to take
+/// them is a caller error (`InvalidInput`): the request asked for something
+/// the model cannot do. Any other knob without a matching parameter is dropped: sampling
 /// knobs are advisory and the predictor simply does not expose them.
 pub fn bind_chat_inputs(
     inputs: ChatInputs,
@@ -125,6 +133,20 @@ pub fn bind_chat_inputs(
             ));
         };
         map.insert(param.name.clone(), Value::List(tools));
+    }
+    if let Some(images) = inputs.images {
+        let Some(param) = get_parameter(
+            &signature.inputs,
+            &[Dtype::ImageList],
+            Some("openai.chat.completions.images")
+        ).1 else {
+            return Err(MunaError::InvalidInput(
+                "Image content is not supported by this model because it does \
+                not declare an images input parameter."
+                    .into()
+            ));
+        };
+        map.insert(param.name.clone(), Value::ImageList(images));
     }
     let mut bind = |value: Option<Value>, dtypes: &[Dtype], denotation: &str| {
         let Some(value) = value else { return };
@@ -222,6 +244,7 @@ mod tests {
         ]));
         let inputs = ChatInputs {
             messages: vec![json!({ "role": "user", "content": "hi" })],
+            images: None,
             tools: Some(vec![json!({ "type": "function" })]),
             response_format: Some(json!({ "type": "json_object" }).as_object().cloned().unwrap()),
             reasoning_effort: Some("high".into()),
@@ -280,6 +303,31 @@ mod tests {
         // No tools requested: the missing parameter is irrelevant.
         let inputs = ChatInputs { messages: vec![], ..Default::default() };
         assert!(bind_chat_inputs(inputs, &signature).is_ok());
+    }
+
+    #[test]
+    fn images_bind_to_the_images_parameter_or_fail() {
+        let image = types::Image { data: vec![0; 4], width: 1, height: 1, channels: 4 };
+        let inputs = || ChatInputs {
+            messages: vec![],
+            images: Some(vec![image.clone()]),
+            ..Default::default()
+        };
+        let with_images = signature(json!([
+            { "name": "conversation", "dtype": "list" },
+            { "name": "pictures", "dtype": "image_list", "optional": true,
+              "denotation": "openai.chat.completions.images" }
+        ]));
+        let map = bind_chat_inputs(inputs(), &with_images).unwrap();
+        assert!(matches!(map.get("pictures"), Some(Value::ImageList(i)) if i == &vec![image.clone()]));
+        let without = signature(json!([{ "name": "messages", "dtype": "list" }]));
+        assert!(matches!(
+            bind_chat_inputs(inputs(), &without),
+            Err(MunaError::InvalidInput(_))
+        ));
+        // No images in the request: the images parameter stays unbound.
+        let map = bind_chat_inputs(ChatInputs::default(), &with_images).unwrap();
+        assert!(!map.contains_key("pictures"));
     }
 
     #[test]

@@ -227,11 +227,37 @@ pub enum ContentBlockParam {
         /// Encrypted reasoning contents.
         data: String,
     },
-    /// Image block. Parsed only so it can be rejected by name.
-    Image,
+    /// Image block. Only `base64` sources are supported; callers fetch
+    /// `url` sources and inline them as `base64` first.
+    Image {
+        /// Image source.
+        source: ImageSource,
+    },
     /// Document block. Parsed only so it can be rejected by name.
     Document,
     /// Any other block type. Parsed so the request fails with a named error.
+    #[serde(other)]
+    Unsupported,
+}
+
+/// Image block source.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ImageSource {
+    /// Inline base64-encoded image.
+    Base64 {
+        /// Image MIME type (e.g. `image/png`).
+        media_type: String,
+        /// Base64-encoded image bytes.
+        data: String,
+    },
+    /// Remote image URL. Parsed only so it can be rejected by name.
+    Url {
+        /// Image URL.
+        url: String,
+    },
+    /// Any other source type (e.g. `file`). Parsed so the request fails
+    /// with a named error.
     #[serde(other)]
     Unsupported,
 }

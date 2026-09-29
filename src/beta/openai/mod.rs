@@ -19,9 +19,6 @@ pub use inputs::*;
 pub use models::*;
 pub use schema::*;
 
-use std::sync::Arc;
-
-use crate::client::Client;
 use crate::services::{PredictionService, PredictorService};
 
 /// Experimental OpenAI client.
@@ -40,11 +37,10 @@ pub struct OpenAIClient {
 impl OpenAIClient {
 
     pub fn new(
-        client: Arc<dyn Client>,
         predictors: PredictorService,
         predictions: PredictionService
     ) -> Self {
-        let chat = ChatService::new(client, predictors.clone(), predictions.clone());
+        let chat = ChatService::new(predictors.clone(), predictions.clone());
         let embeddings = EmbeddingService::new(predictors.clone(), predictions.clone());
         let images = ImageService::new(predictors.clone(), predictions);
         let models = ModelService::new(predictors);

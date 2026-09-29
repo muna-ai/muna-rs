@@ -59,11 +59,7 @@ impl Muna {
         let users = services::UserService::new(client.clone());
         let predictors = services::PredictorService::new(client.clone());
         let predictions = services::PredictionService::new(client.clone());
-        let beta = beta::BetaClient::new(
-            client.clone(),
-            predictors.clone(),
-            predictions.clone()
-        );
+        let beta = beta::BetaClient::new(predictors.clone(), predictions.clone());
         Self {
             client,
             users,

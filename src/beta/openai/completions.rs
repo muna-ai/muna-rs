@@ -15,7 +15,7 @@ use tokio::sync::RwLock;
 
 use crate::beta::utils::get_parameter;
 use crate::c;
-use crate::client::{Client, Result};
+use crate::client::Result;
 use crate::MunaError;
 use crate::services::{PredictionService, PredictorService};
 use crate::types::{self, Acceleration, Dtype, Prediction, Signature, Value};
@@ -34,12 +34,11 @@ use super::schema::{
 pub type ChatCompletionStream = Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk>> + Send>>;
 
 /// Cached predictor metadata for fast chat completion creation. Chat
-/// inputs bind against `signature` through `bind_chat_inputs`; only the
-/// media inputs (which need client-side decoding) are resolved here.
+/// inputs (images included) bind against `signature` through
+/// `bind_chat_inputs`; only the audio input is resolved here.
 #[derive(Clone)]
 struct DelegateInfo {
     signature: Signature,
-    images_param_name: Option<String>,
     audios_param_name: Option<String>,
     /// Declared PCM sample rate of the audios parameter; all decoded
     /// audio content parts are resampled to it.
@@ -50,7 +49,6 @@ struct DelegateInfo {
 /// Create chat completions.
 #[derive(Clone)]
 pub struct ChatCompletionService {
-    client: Arc<dyn Client>,
     predictors: PredictorService,
     predictions: PredictionService,
     cache: Arc<RwLock<HashMap<String, DelegateInfo>>>,
@@ -59,12 +57,10 @@ pub struct ChatCompletionService {
 impl ChatCompletionService {
 
     pub fn new(
-        client: Arc<dyn Client>,
         predictors: PredictorService,
         predictions: PredictionService
     ) -> Self {
         Self {
-            client,
             predictors,
             predictions,
             cache: Arc::new(RwLock::new(HashMap::new())),
@@ -119,7 +115,7 @@ impl ChatCompletionService {
 
     async fn prepare_prediction(
         &self,
-        params: ChatCompletionCreateParams,
+        mut params: ChatCompletionCreateParams,
     ) -> Result<(HashMap<String, Value>, usize, Acceleration)> {
         self.ensure_delegate_info(&params.model).await?;
         let info = {
@@ -132,15 +128,16 @@ impl ChatCompletionService {
                 ))
             })?
         };
-        let media = decode_media(self.client.as_ref(), &params.messages, &info).await?;
-        let mut input_map = bind_chat_inputs(params.chat_inputs()?, &info.signature)?;
-        if let (false, Some(name)) = (media.images.is_empty(), info.images_param_name) {
-            input_map.insert(name, Value::ImageList(media.images));
+        let audios = decode_audios(&params.messages, &info)?;
+        let acceleration = params.acceleration.take().unwrap_or(Acceleration::LocalAuto);
+        // Image decoding is CPU-bound (tens of milliseconds per image).
+        let inputs = tokio::task::spawn_blocking(move || params.chat_inputs())
+            .await
+            .map_err(|e| MunaError::Prediction(format!("Failed to prepare chat inputs: {e}")))??;
+        let mut input_map = bind_chat_inputs(inputs, &info.signature)?;
+        if let (false, Some(name)) = (audios.is_empty(), info.audios_param_name) {
+            input_map.insert(name, Value::ArrayList(audios));
         }
-        if let (false, Some(name)) = (media.audios.is_empty(), info.audios_param_name) {
-            input_map.insert(name, Value::ArrayList(media.audios));
-        }
-        let acceleration = params.acceleration.unwrap_or(Acceleration::LocalAuto);
         Ok((input_map, info.completion_param_idx, acceleration))
     }
 
@@ -169,13 +166,6 @@ impl ChatCompletionService {
             ))
         })?;
         let signature = &predictor.signature;
-        let images_param_name = get_parameter(
-            &signature.inputs,
-            &[Dtype::ImageList],
-            Some("openai.chat.completions.images"),
-        )
-        .1
-        .map(|p| p.name.clone());
         let audios_param = get_parameter(
             &signature.inputs,
             &[Dtype::ArrayList],
@@ -205,7 +195,6 @@ impl ChatCompletionService {
             })?;
         Ok(DelegateInfo {
             signature: signature.clone(),
-            images_param_name,
             audios_param_name,
             audio_sample_rate,
             completion_param_idx,
@@ -219,6 +208,12 @@ impl ChatCompletionCreateParams {
     /// the predictor's to interpret (drop, prefill, constrain), so `tools`
     /// is forwarded verbatim whenever present. Anthropic-only knobs stay
     /// `None`.
+    ///
+    /// `image_url` parts must be `data:` URLs: they are decoded here, in
+    /// order of appearance, without any network access. Callers that accept
+    /// remote image URLs fetch them and inline them as `data:` URLs first.
+    /// Decoding is CPU-bound (tens of milliseconds per large image), so
+    /// async callers should run this off the executor.
     pub fn chat_inputs(&self) -> Result<ChatInputs> {
         let tools = match &self.tools {
             Some(tools) if !tools.is_empty() => Some(
@@ -230,8 +225,17 @@ impl ChatCompletionCreateParams {
             ),
             _ => None,
         };
+        let images = media_parts(&self.messages)
+            .into_iter()
+            .filter_map(|part| match part {
+                ChatCompletionContentPart::ImageUrl { image_url } => Some(&image_url.url),
+                _ => None,
+            })
+            .map(|url| decode_image_url(url))
+            .collect::<Result<Vec<_>>>()?;
         Ok(ChatInputs {
             messages: normalize_messages(&self.messages)?,
+            images: (!images.is_empty()).then_some(images),
             tools,
             response_format: self.response_format.clone(),
             reasoning_effort: self.reasoning_effort.map(|e| e.as_str().to_string()),
@@ -338,37 +342,20 @@ fn media_parts(messages: &[ChatCompletionMessage]) -> Vec<&ChatCompletionContent
         .collect()
 }
 
-/// Decoded media for the predictor's parallel media inputs.
-#[derive(Debug, Default)]
-struct DecodedMedia {
-    images: Vec<types::Image>,
-    audios: Vec<types::Tensor>,
-}
-
-/// Decode the conversation's media parts in order of appearance, rejecting
-/// modalities the model does not declare.
-async fn decode_media(
-    client: &dyn Client,
+/// Decode the conversation's audio parts in order of appearance, rejecting
+/// audio the model does not declare and file parts. Images are decoded by
+/// `chat_inputs` and bound (or rejected) by `bind_chat_inputs`.
+fn decode_audios(
     messages: &[ChatCompletionMessage],
     info: &DelegateInfo
-) -> Result<DecodedMedia> {
-    let mut media = DecodedMedia::default();
+) -> Result<Vec<types::Tensor>> {
+    let mut audios = Vec::new();
     for part in media_parts(messages) {
         match part {
-            ChatCompletionContentPart::ImageUrl { image_url }
-                if info.images_param_name.is_some() =>
-            {
-                media.images.push(decode_image(client, &image_url.url).await?);
-            }
             ChatCompletionContentPart::InputAudio { input_audio }
                 if info.audios_param_name.is_some() =>
             {
-                media.audios.push(decode_audio(input_audio, info.audio_sample_rate)?);
-            }
-            ChatCompletionContentPart::ImageUrl { .. } => {
-                return Err(MunaError::InvalidInput(
-                    "`image_url` content is not supported by this model.".into(),
-                ));
+                audios.push(decode_audio(input_audio, info.audio_sample_rate)?);
             }
             ChatCompletionContentPart::InputAudio { .. } => {
                 return Err(MunaError::InvalidInput(
@@ -380,52 +367,51 @@ async fn decode_media(
                     "File content parts are not yet supported.".into(),
                 ));
             }
-            ChatCompletionContentPart::Text { .. } | ChatCompletionContentPart::Refusal { .. } => {}
+            ChatCompletionContentPart::ImageUrl { .. }
+            | ChatCompletionContentPart::Text { .. }
+            | ChatCompletionContentPart::Refusal { .. } => {}
         }
     }
-    Ok(media)
+    Ok(audios)
 }
 
-/// Maximum size of a remotely-fetched image.
-const MAX_IMAGE_FETCH_BYTES: usize = 20 * 1024 * 1024;
-
-/// Decode an image content part URL (base64 data URL or remote URL) into
-/// a decoded pixel buffer.
-async fn decode_image(
-    client: &dyn Client,
-    url: &str
-) -> Result<types::Image> {
-    let (data, mime) = if let Some(rest) = url.strip_prefix("data:") {
-        let (meta, payload) = rest.split_once(',').ok_or_else(|| {
-            MunaError::InvalidInput("Malformed data URL in `image_url` content part.".into())
-        })?;
-        let mime = meta
-            .split(';')
-            .next()
-            .filter(|m| !m.is_empty())
-            .unwrap_or("image/*")
-            .to_string();
-        let data = BASE64.decode(payload).map_err(|e| {
-            MunaError::InvalidInput(format!("Failed to decode image data URL: {e}"))
-        })?;
-        (data, mime)
-    } else {
-        let data = client.fetch(url).await.map_err(|e| {
-            MunaError::InvalidInput(format!("Failed to fetch image at {url}: {e}"))
-        })?;
-        if data.len() > MAX_IMAGE_FETCH_BYTES {
-            return Err(MunaError::InvalidInput(format!(
-                "Image at {url} exceeds the maximum size of {MAX_IMAGE_FETCH_BYTES} bytes."
-            )));
-        }
-        (data, "image/*".to_string())
+/// Decode an `image_url` content part's `data:` URL into a pixel buffer.
+/// Remote URLs are rejected: fetching is the caller's job.
+fn decode_image_url(url: &str) -> Result<types::Image> {
+    let Some(rest) = url.strip_prefix("data:") else {
+        return Err(MunaError::InvalidInput(
+            "`image_url` content must be a base64 `data:` URL. Fetch remote \
+            images and pass them inline as data URLs."
+                .into(),
+        ));
     };
-    let value = c::Value::from_bytes(&data, &mime)?;
-    match value.to_object()? {
+    let (meta, payload) = rest.split_once(',').ok_or_else(|| {
+        MunaError::InvalidInput("Malformed data URL in `image_url` content part.".into())
+    })?;
+    let mime = meta
+        .split(';')
+        .next()
+        .filter(|m| !m.is_empty())
+        .unwrap_or("image/*");
+    decode_base64_image(payload, mime)
+}
+
+/// Decode a base64 image payload of the given MIME type (e.g. `image/png`)
+/// into a pixel buffer through the Function C library.
+pub(crate) fn decode_base64_image(
+    payload: &str,
+    mime: &str
+) -> Result<types::Image> {
+    let data = BASE64.decode(payload).map_err(|e| {
+        MunaError::InvalidInput(format!("Failed to decode base64 image data: {e}"))
+    })?;
+    let invalid = || MunaError::InvalidInput(
+        format!("Failed to decode image content of type `{mime}` into an image.")
+    );
+    let value = c::Value::from_bytes(&data, mime).map_err(|_| invalid())?;
+    match value.to_object().map_err(|_| invalid())? {
         types::Value::Image(image) => Ok(image),
-        _ => Err(MunaError::InvalidInput(
-            "Failed to decode `image_url` content part into an image.".into(),
-        )),
+        _ => Err(invalid()),
     }
 }
 
@@ -708,19 +694,12 @@ mod tests {
         assert_eq!(details.reasoning_tokens, Some(3));
     }
 
-    /// Real client for normalization tests; never touches the network
-    /// because the tests only use data URLs.
-    fn test_client() -> crate::client::MunaClient {
-        crate::client::MunaClient::new(None, None)
-    }
-
-    fn delegate_info(images: bool) -> DelegateInfo {
+    fn delegate_info() -> DelegateInfo {
         DelegateInfo {
             signature: serde_json::from_value(json!({
                 "inputs": [{ "name": "messages", "dtype": "list" }],
                 "outputs": [],
             })).unwrap(),
-            images_param_name: images.then(|| "images".to_string()),
             audios_param_name: None,
             audio_sample_rate: None,
             completion_param_idx: 0,
@@ -792,45 +771,71 @@ mod tests {
         assert!(media_parts(&messages).is_empty());
     }
 
-    #[tokio::test]
-    async fn media_parts_decode_into_placeholders() {
-        let messages: Vec<ChatCompletionMessage> = serde_json::from_value(json!([
-            { "role": "user", "content": [
-                { "type": "text", "text": "describe this" },
-                { "type": "image_url", "image_url": {
-                    "url": format!("data:image/png;base64,{RED_PNG_B64}"),
-                } },
-            ] },
-        ])).unwrap();
-        assert_eq!(media_parts(&messages).len(), 1);
-        let media = decode_media(&test_client(), &messages, &delegate_info(true)).await.unwrap();
-        assert_eq!(media.images.len(), 1);
-        assert!(media.audios.is_empty());
-        let normalized = normalize_messages(&messages).unwrap();
+    fn image_params(urls: &[String]) -> ChatCompletionCreateParams {
+        let mut parts = vec![json!({ "type": "text", "text": "describe these" })];
+        parts.extend(urls.iter().map(|url| json!({ "type": "image_url", "image_url": { "url": url } })));
+        serde_json::from_value(json!({
+            "model": "@a/x",
+            "messages": [{ "role": "user", "content": parts }],
+        })).unwrap()
+    }
+
+    #[test]
+    fn data_url_images_decode_into_chat_inputs_in_order() {
+        let url = format!("data:image/png;base64,{RED_PNG_B64}");
+        let inputs = image_params(&[url.clone(), url]).chat_inputs().unwrap();
+        let images = inputs.images.unwrap();
+        assert_eq!(images.len(), 2);
+        assert_eq!((images[0].width, images[0].height), (2, 2));
+        assert_eq!(images[0], images[1]);
         assert_eq!(
-            normalized[0]["content"],
+            inputs.messages[0]["content"],
             json!([
-                { "type": "text", "text": "describe this" },
+                { "type": "text", "text": "describe these" },
+                { "type": "image" },
                 { "type": "image" },
             ])
         );
+        // No image parts: no images input at all.
+        assert_eq!(image_params(&[]).chat_inputs().unwrap().images, None);
     }
 
-    #[tokio::test]
-    async fn decode_media_rejects_undeclared_and_file_modalities() {
+    #[test]
+    fn remote_and_malformed_image_urls_are_rejected() {
+        for url in [
+            "https://example.com/cat.png",
+            "data:image/png;base64",
+            "data:image/png;base64,!!!",
+            "data:image/png;base64,AA=="
+        ] {
+            let error = image_params(&[url.to_string()]).chat_inputs().unwrap_err();
+            assert!(matches!(error, MunaError::InvalidInput(_)), "{url}: {error}");
+        }
+        let error = image_params(&["https://example.com/cat.png".into()]).chat_inputs().unwrap_err();
+        assert!(error.to_string().contains("data:"), "{error}");
+    }
+
+    #[test]
+    fn decode_audios_rejects_undeclared_audio_and_file_parts() {
         let messages: Vec<ChatCompletionMessage> = serde_json::from_value(json!([
             { "role": "user", "content": [
-                { "type": "image_url", "image_url": { "url": "data:image/png;base64,AAAA" } },
+                { "type": "image_url", "image_url": { "url": "https://example.com/cat.png" } },
             ] },
         ])).unwrap();
-        let error = decode_media(&test_client(), &messages, &delegate_info(false)).await.unwrap_err();
-        assert!(matches!(&error, MunaError::InvalidInput(m) if m.contains("image_url")));
+        assert!(decode_audios(&messages, &delegate_info()).unwrap().is_empty());
+        let messages: Vec<ChatCompletionMessage> = serde_json::from_value(json!([
+            { "role": "user", "content": [
+                { "type": "input_audio", "input_audio": { "data": "AAAA", "format": "wav" } },
+            ] },
+        ])).unwrap();
+        let error = decode_audios(&messages, &delegate_info()).unwrap_err();
+        assert!(matches!(&error, MunaError::InvalidInput(m) if m.contains("input_audio")));
         let messages: Vec<ChatCompletionMessage> = serde_json::from_value(json!([
             { "role": "user", "content": [
                 { "type": "file", "file": { "file_data": "AAAA", "filename": "doc.pdf" } },
             ] },
         ])).unwrap();
-        let error = decode_media(&test_client(), &messages, &delegate_info(true)).await.unwrap_err();
+        let error = decode_audios(&messages, &delegate_info()).unwrap_err();
         assert!(matches!(&error, MunaError::InvalidInput(m) if m.contains("File content parts")));
     }
 
@@ -976,7 +981,9 @@ mod tests {
         // Media parts, assistant tool calls, and (possibly empty) tool
         // results are payload on their own.
         inputs(json!([{ "role": "user", "content": [
-            { "type": "image_url", "image_url": { "url": "data:image/png;base64,AA==" } },
+            { "type": "image_url", "image_url": {
+                "url": format!("data:image/png;base64,{RED_PNG_B64}"),
+            } },
         ] }])).unwrap();
         inputs(json!([
             { "role": "user", "content": "weather?" },
