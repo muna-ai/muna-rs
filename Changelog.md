@@ -1,5 +1,5 @@
 ## 0.0.30
-*INCOMPLETE*
++ Upgraded to Function C 0.0.49.
 
 ## 0.0.29
 + Added support for `image` blocks with `base64` sources in `muna.beta.anthropic.messages.create`.
