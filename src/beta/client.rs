@@ -7,6 +7,7 @@ use crate::services::{PredictionService, PredictorService};
 
 use super::anthropic::AnthropicClient;
 use super::openai::OpenAIClient;
+use super::typesafe::TypeSafeClient;
 
 /// Client for incubating features.
 #[derive(Clone)]
@@ -15,6 +16,8 @@ pub struct BetaClient {
     pub anthropic: AnthropicClient,
     /// OpenAI-compatible client.
     pub openai: OpenAIClient,
+    /// TypeSafe-compatible client.
+    pub typesafe: TypeSafeClient,
 }
 
 impl BetaClient {
@@ -24,7 +27,8 @@ impl BetaClient {
         predictions: PredictionService,
     ) -> Self {
         let anthropic = AnthropicClient::new(predictors.clone(), predictions.clone());
-        let openai = OpenAIClient::new(predictors, predictions);
-        Self { anthropic, openai }
+        let openai = OpenAIClient::new(predictors.clone(), predictions.clone());
+        let typesafe = TypeSafeClient::new(predictors, predictions);
+        Self { anthropic, openai, typesafe }
     }
 }

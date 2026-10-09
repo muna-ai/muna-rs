@@ -1,6 +1,6 @@
 [package]
 name = "muna"
-version = "0.0.30"
+version = "0.0.31"
 edition = "2021"
 description = "Run prediction functions in your Rust apps."
 license = "Apache-2.0"
@@ -14,7 +14,7 @@ exclude = ["tests/", ".env*", ".vscode/", ".github/"]
 links = "Function"
 
 [package.metadata.fxnc]
-version = "0.0.49"
+version = "0.0.50"
 
 [dependencies]
 async-stream = "0.3"
@@ -23,6 +23,7 @@ base64 = "0.22"
 futures-core = "0.3"
 futures-util = "0.3"
 home = "0.5.12"
+indexmap = { version = "2", features = ["serde"] }
 reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "stream",

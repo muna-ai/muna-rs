@@ -1,3 +1,7 @@
+## 0.0.31
++ Added `muna.beta.typesafe.system_one` method for evaluating a state against typed questions with System One decision models.
++ Upgraded to Function C 0.0.50.
+
 ## 0.0.30
 + Upgraded to Function C 0.0.49.
 

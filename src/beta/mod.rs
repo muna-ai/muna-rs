@@ -7,4 +7,5 @@ mod client;
 mod utils;
 pub mod anthropic;
 pub mod openai;
+pub mod typesafe;
 pub use client::*;
