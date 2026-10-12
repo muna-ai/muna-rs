@@ -95,6 +95,7 @@ async fn test_create_remote_prediction() {
 }
 
 #[tokio::test]
+#[ignore = "remote streaming endpoint is disabled"]
 async fn test_stream_remote_prediction() {
     let _ = dotenvy::dotenv();
     let muna = Muna::default();

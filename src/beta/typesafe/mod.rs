@@ -96,7 +96,7 @@ impl TypeSafeClient {
             )))?;
         Ok(SystemOneResponse {
             model: model.to_string(),
-            answers: output.answers,
+            answers: order_answers(&params.questions, output.answers),
             usage: output.usage,
         })
     }
@@ -187,6 +187,21 @@ fn bind_inputs(
     ]))
 }
 
+fn order_answers(
+    questions: &IndexMap<String, Question>,
+    mut answers: IndexMap<String, Answer>
+) -> IndexMap<String, Answer> {
+    // Predictor dicts cross the FFI as `serde_json::Map`, which sorts keys,
+    // so restore the caller's question order. Unknown ids keep their place
+    // after the known ones.
+    let mut ordered: IndexMap<String, Answer> = questions
+        .keys()
+        .filter_map(|id| answers.shift_remove_entry(id))
+        .collect();
+    ordered.extend(answers);
+    ordered
+}
+
 fn validate_questions(questions: &IndexMap<String, Question>) -> Result<()> {
     if questions.is_empty() {
         return Err(MunaError::InvalidInput(
@@ -227,11 +242,23 @@ mod tests {
     fn decision_signature() -> Signature {
         signature(
             json!([
-                { "name": "context", "dtype": "list", "denotation": "typesafe.systemone.state" },
-                { "name": "schema", "dtype": "dict", "denotation": "typesafe.systemone.questions" }
+                {
+                    "name": "context",
+                    "dtype": "list",
+                    "denotation": "typesafe.systemone.state"
+                },
+                {
+                    "name": "schema",
+                    "dtype": "dict",
+                    "denotation": "typesafe.systemone.questions"
+                }
             ]),
             json!([
-                { "name": "result", "dtype": "dict", "schema": { "title": "SystemOneResponse" } }
+                {
+                    "name": "result",
+                    "dtype": "dict",
+                    "schema": { "title": "SystemOneResponse" }
+                }
             ])
         )
     }
@@ -242,7 +269,9 @@ mod tests {
 
     #[test]
     fn deserializes_wire_request_and_ignores_router_fields() {
-        let params: SystemOneCreateParams = serde_json::from_value(json!({
+        // Parsed from text, as a server receives it: `json!` would build a
+        // key-sorted `serde_json::Map` and lose the question order.
+        let params: SystemOneCreateParams = serde_json::from_str(r#"{
             "model": "@bespokelabs/nimble-9b",
             "state": { "ticket": "I was charged twice." },
             "questions": {
@@ -255,7 +284,7 @@ mod tests {
             },
             "provider": { "allow_fallbacks": true },
             "session_id": "session-1234"
-        })).unwrap();
+        }"#).unwrap();
         assert_eq!(
             params.questions.keys().collect::<Vec<_>>(),
             ["route", "urgency", "escalate"]
@@ -270,22 +299,36 @@ mod tests {
     fn parses_mixed_response_in_order() {
         let output: PredictorOutput = serde_json::from_value(json!({
             "answers": {
-                "route": { "type": "choice", "choice": "billing", "confidence": 0.99,
-                           "probabilities": { "billing": 0.99, "bug": 0.0, "account": 0.01 } },
-                "urgency": { "type": "score", "score": 2.1, "confidence": 0.7,
-                             "legend": { "0": "routine", "1": "today" },
-                             "probabilities": { "0": 0.4, "1": 0.6 } },
+                "route": {
+                    "type": "choice",
+                    "choice": "billing",
+                    "confidence": 0.99,
+                    "probabilities": { "billing": 0.99, "bug": 0.0, "account": 0.01 }
+                },
+                "urgency": {
+                    "type": "score",
+                    "score": 2.1,
+                    "confidence": 0.7,
+                    "legend": { "0": "routine", "1": "today" },
+                    "probabilities": { "0": 0.4, "1": 0.6 }
+                },
                 "escalate": { "type": "noul", "noul": 0.94 }
             },
             "usage": { "input_tokens": 412, "output_tokens": 3 }
         })).unwrap();
+        let questions: IndexMap<String, Question> = serde_json::from_str(r#"{
+            "route": { "type": "choice", "instructions": "Where?", "criteria": { "billing": null } },
+            "urgency": { "type": "score", "instructions": "How urgent?", "criteria": ["routine", "today"] },
+            "escalate": { "type": "noul", "instructions": "Escalate?" }
+        }"#).unwrap();
+        let answers = order_answers(&questions, output.answers);
         assert_eq!(
-            output.answers.keys().collect::<Vec<_>>(),
+            answers.keys().collect::<Vec<_>>(),
             ["route", "urgency", "escalate"]
         );
-        assert!(matches!(&output.answers["escalate"], Answer::Noul(a) if a.noul == 0.94));
-        assert!(matches!(&output.answers["route"], Answer::Choice(a) if a.choice == "billing"));
-        assert!(matches!(&output.answers["urgency"], Answer::Score(a) if a.probabilities["1"] == 0.6));
+        assert!(matches!(&answers["escalate"], Answer::Noul(a) if a.noul == 0.94));
+        assert!(matches!(&answers["route"], Answer::Choice(a) if a.choice == "billing"));
+        assert!(matches!(&answers["urgency"], Answer::Score(a) if a.probabilities["1"] == 0.6));
         assert_eq!(output.usage.input_tokens, Some(412));
     }
 
@@ -310,7 +353,11 @@ mod tests {
     #[test]
     fn rejects_unknown_noul_criteria_keys() {
         let result = serde_json::from_value::<IndexMap<String, Question>>(json!({
-            "q": { "type": "noul", "instructions": "Yes?", "criteria": { "maybe": "unsure" } }
+            "q": {
+                "type": "noul",
+                "instructions": "Yes?",
+                "criteria": { "maybe": "unsure" }
+            }
         }));
         assert!(result.is_err());
     }
@@ -353,16 +400,37 @@ mod tests {
     fn rejects_predictors_without_the_contract() {
         let missing_questions = signature(
             json!([
-                { "name": "context", "dtype": "list", "denotation": "typesafe.systemone.state" },
-                { "name": "other", "dtype": "dict" }
+                {
+                    "name": "context",
+                    "dtype": "list",
+                    "denotation": "typesafe.systemone.state"
+                },
+                {
+                    "name": "other",
+                    "dtype": "dict"
+                }
             ]),
-            json!([{ "name": "result", "dtype": "dict", "schema": { "title": "SystemOneResponse" } }])
+            json!([
+                {
+                    "name": "result",
+                    "dtype": "dict",
+                    "schema": { "title": "SystemOneResponse" }
+                }
+            ])
         );
         assert!(resolve_delegate_info("@test/a", &missing_questions).is_err());
         let missing_output = signature(
             json!([
-                { "name": "context", "dtype": "list", "denotation": "typesafe.systemone.state" },
-                { "name": "schema", "dtype": "dict", "denotation": "typesafe.systemone.questions" }
+                {
+                    "name": "context",
+                    "dtype": "list",
+                    "denotation": "typesafe.systemone.state"
+                },
+                {
+                    "name": "schema",
+                    "dtype": "dict",
+                    "denotation": "typesafe.systemone.questions"
+                }
             ]),
             json!([{ "name": "result", "dtype": "dict", "schema": { "title": "Other" } }])
         );
