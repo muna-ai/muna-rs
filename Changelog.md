@@ -1,3 +1,6 @@
+## 0.0.31
+*INCOMPLETE*
+
 ## 0.0.30
 + Added support for running compiled models from Hugging Face repositories with `hf:<repo-id>` tags.
 + Added `muna.beta.typesafe.system_one` method for evaluating a state against typed questions with System One decision models.

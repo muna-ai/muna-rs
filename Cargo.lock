@@ -635,7 +635,7 @@ dependencies = [
 
 [[package]]
 name = "muna"
-version = "0.0.30"
+version = "0.0.31"
 dependencies = [
  "async-stream",
  "async-trait",
