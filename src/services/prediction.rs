@@ -20,6 +20,7 @@ use tokio::sync::{Mutex, RwLock};
 
 use crate::c;
 use crate::client::{Client, ClientExt, MunaError, RequestInput, Result, SseEvent};
+use crate::hf::{download_hf_file, load_hf_manifest, parse_hf_tag, HfTag};
 use crate::types::{
     self, Acceleration, Dtype, Prediction, PredictionResource,
     RemotePrediction, RemoteValue, Value,
@@ -132,6 +133,9 @@ impl PredictionService {
     ) -> Result<Prediction> {
         let inputs = match inputs {
             Some(inputs) if inputs.is_empty() => {
+                if let Some(hf_tag) = parse_hf_tag(tag) {
+                    return self.create_hf_prediction(&hf_tag).await;
+                }
                 let prediction = self
                     .create_raw_prediction(tag, client_id, configuration_id)
                     .await?;
@@ -278,7 +282,14 @@ impl PredictionService {
         }
 
         let acceleration = acceleration.clone().unwrap_or(Acceleration::LocalAuto);
-        let mut resolution = self.get_or_refresh_prediction(&key, false).await?;
+        let hf_tag = parse_hf_tag(tag);
+        let mut resolution = match &hf_tag {
+            Some(hf_tag) => PredictionResolution {
+                prediction: self.create_hf_prediction(hf_tag).await?,
+                next_refresh: None,
+            },
+            None => self.get_or_refresh_prediction(&key, false).await?,
+        };
         let configuration = self.create_native_configuration(
             tag,
             &acceleration,
@@ -286,6 +297,7 @@ impl PredictionService {
         ).await?;
         let predictor = match c::Predictor::new(&configuration) {
             Ok(predictor) => predictor,
+            Err(error) if hf_tag.is_some() => return Err(error),
             Err(_) => {
                 // The native API does not expose enough detail to distinguish a
                 // bad cached token/resource from other creation failures. Clear
@@ -315,21 +327,25 @@ impl PredictionService {
         acceleration: &Acceleration,
         prediction: &Prediction,
     ) -> Result<c::Configuration> {
-        let config_token = prediction.configuration.clone().ok_or_else(|| {
-            MunaError::Prediction(format!(
+        // Community predictors on Hugging Face do not have configuration tokens.
+        let config_token = prediction.configuration.as_deref();
+        if config_token.is_none() && parse_hf_tag(tag).is_none() {
+            return Err(MunaError::Prediction(format!(
                 "Failed to create {tag} prediction because configuration token is missing"
-            ))
-        })?;
+            )));
+        }
         let mut configuration = c::Configuration::new()?;
-        configuration.set_tag(tag)?;
-        configuration.set_token(&config_token)?;
+        configuration.set_tag(&prediction.tag)?;
+        if let Some(config_token) = config_token {
+            configuration.set_token(config_token)?;
+        }
         configuration.set_acceleration(c::acceleration_to_c(acceleration))?;
         if let Some(resources) = &prediction.resources {
             for resource in resources {
                 configuration.add_resource(&resource.kind, &resource.url)?;
             }
         }
-        for entry in parse_preload_claim(&config_token) {
+        for entry in config_token.map(parse_preload_claim).unwrap_or_default() {
             // Box::pin breaks the `create -> load_predictor -> create` async
             // recursion that would otherwise make the future type infinite.
             let inputs = HashMap::from([("_".to_string(), Value::Null)]);
@@ -560,6 +576,28 @@ impl PredictionService {
         Ok(Prediction {
             resources,
             ..prediction.clone()
+        })
+    }
+
+    /// Create a prediction from a Hugging Face repository, downloading its
+    /// resources into the Hugging Face cache.
+    async fn create_hf_prediction(&self, hf_tag: &HfTag) -> Result<Prediction> {
+        let manifest = load_hf_manifest(hf_tag).await?;
+        let mut resources = Vec::new();
+        for resource in manifest.prediction.resources.iter().flatten() {
+            let filename = resource.url.rsplit('/').next().unwrap_or(&resource.url);
+            let path = download_hf_file(&hf_tag.repo_id, filename, hf_tag.revision.as_deref())
+                .await?;
+            resources.push(PredictionResource {
+                url: path.to_string_lossy().into_owned(),
+                ..resource.clone()
+            });
+        }
+        Ok(Prediction {
+            configuration: None,
+            resources: Some(resources),
+            created: chrono_now(),
+            ..manifest.prediction
         })
     }
 

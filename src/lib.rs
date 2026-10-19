@@ -6,6 +6,7 @@
 pub mod beta;
 pub mod c;
 pub mod client;
+pub mod hf;
 pub mod services;
 pub mod types;
 
