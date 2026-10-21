@@ -1,3 +1,6 @@
+## 0.0.32
+*INCOMPLETE*
+
 ## 0.0.31
 + Added `Device` type for specifying local compute devices.
 + Added `devices` parameter to `muna.predictions.create` and `muna.predictions.stream` methods.
