@@ -98,6 +98,9 @@ pub struct PredictionResource {
     /// Resource name.
     #[serde(default)]
     pub name: Option<String>,
+    /// Resource size in bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
 }
 
 /// Hardware requirements of a compiled predictor.
@@ -110,9 +113,6 @@ pub struct PredictionRequirements {
     /// Required GPU compute architecture (e.g. `sm_100`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu_architecture: Option<String>,
-    /// Total size of the predictor's resources in bytes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub disk_bytes: Option<u64>,
 }
 
 /// Remote prediction result.

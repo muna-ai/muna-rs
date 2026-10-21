@@ -296,7 +296,6 @@ impl PredictionService {
             None => self.get_or_refresh_prediction(&key, false).await?,
         };
         let configuration = self.create_native_configuration(
-            tag,
             &acceleration,
             devices,
             &resolution.prediction
@@ -311,7 +310,6 @@ impl PredictionService {
                 self.invalidate_prediction_cache(&key).await;
                 resolution = self.get_or_refresh_prediction(&key, true).await?;
                 let configuration = self.create_native_configuration(
-                    tag,
                     &acceleration,
                     devices,
                     &resolution.prediction
@@ -330,18 +328,12 @@ impl PredictionService {
 
     async fn create_native_configuration(
         &self,
-        tag: &str,
         acceleration: &Acceleration,
         devices: Option<&[Device]>,
         prediction: &Prediction,
     ) -> Result<c::Configuration> {
-        // Community predictors on Hugging Face do not have configuration tokens.
+        // Predictors compiled for community distribution do not have configuration tokens.
         let config_token = prediction.configuration.as_deref();
-        if config_token.is_none() && parse_hf_tag(tag).is_none() {
-            return Err(MunaError::Prediction(format!(
-                "Failed to create {tag} prediction because configuration token is missing"
-            )));
-        }
         let mut configuration = c::Configuration::new()?;
         configuration.set_tag(&prediction.tag)?;
         if let Some(config_token) = config_token {
@@ -354,7 +346,7 @@ impl PredictionService {
                 configuration.add_resource(&resource.kind, &resource.url)?;
             }
         }
-        for entry in config_token.map(parse_preload_claim).unwrap_or_default() {
+        for entry in parse_preload_claim(config_token) {
             // Box::pin breaks the `create -> load_predictor -> create` async
             // recursion that would otherwise make the future type infinite.
             let inputs = HashMap::from([("_".to_string(), Value::Null)]);
@@ -647,8 +639,9 @@ fn parse_configuration_claims<T: serde::de::DeserializeOwned>(config_token: &str
     serde_json::from_slice(&payload).ok()
 }
 
-fn parse_preload_claim(config_token: &str) -> Vec<PreloadEntry> {
-    parse_configuration_claims::<ConfigurationClaims>(config_token)
+fn parse_preload_claim(config_token: Option<&str>) -> Vec<PreloadEntry> {
+    config_token
+        .and_then(parse_configuration_claims::<ConfigurationClaims>)
         .map(|claims| claims.preload)
         .unwrap_or_default()
 }
@@ -1098,7 +1091,7 @@ mod tests {
 
     #[test]
     fn parses_preload_claim() {
-        let entries = parse_preload_claim(&token(serde_json::json!({
+        let entries = parse_preload_claim(Some(&token(serde_json::json!({
             "tag": "@user/model",
             "preload": [
                 {
@@ -1112,7 +1105,7 @@ mod tests {
                     "metadata": "draft_endpoint"
                 }
             ]
-        })));
+        }))));
 
         assert_eq!(
             entries,
@@ -1133,14 +1126,14 @@ mod tests {
 
     #[test]
     fn ignores_unknown_preload_fields() {
-        let entries = parse_preload_claim(&token(serde_json::json!({
+        let entries = parse_preload_claim(Some(&token(serde_json::json!({
             "preload": [{
                 "tag": "@user/model:decode",
                 "acceleration": "remote_future_accelerator",
                 "metadata": "tent_endpoint",
                 "future": {"value": true}
             }]
-        })));
+        }))));
 
         assert_eq!(
             entries,
@@ -1154,15 +1147,16 @@ mod tests {
 
     #[test]
     fn absent_or_malformed_preload_claim_is_empty() {
-        assert!(parse_preload_claim(&token(serde_json::json!({
+        assert!(parse_preload_claim(Some(&token(serde_json::json!({
             "tag": "@user/model"
-        })))
+        }))))
         .is_empty());
-        assert!(parse_preload_claim("not-a-jwt").is_empty());
-        assert!(parse_preload_claim("header.%%%.signature").is_empty());
-        assert!(parse_preload_claim(&token(serde_json::json!({
+        assert!(parse_preload_claim(None).is_empty());
+        assert!(parse_preload_claim(Some("not-a-jwt")).is_empty());
+        assert!(parse_preload_claim(Some("header.%%%.signature")).is_empty());
+        assert!(parse_preload_claim(Some(&token(serde_json::json!({
             "preload": [{"tag": "@user/model:decode"}]
-        })))
+        }))))
         .is_empty());
     }
 
@@ -1213,6 +1207,7 @@ mod tests {
                 kind: "dso".into(),
                 url: "https://cdn.example/resources/libfake.so".into(),
                 name: Some("libfake.so".into()),
+                size: Some(1024),
             }]),
             ..prediction("pred", token(serde_json::json!({})))
         };

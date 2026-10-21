@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -804,6 +805,7 @@ impl Client for MunaClient {
 /// Build a temporary download path in the destination's directory so the
 /// final rename stays on the same filesystem (atomic, no cross-device move).
 fn download_temp_path(path: &Path) -> PathBuf {
+    static DOWNLOAD_COUNTER: AtomicU64 = AtomicU64::new(0);
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -813,11 +815,9 @@ fn download_temp_path(path: &Path) -> PathBuf {
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("resource");
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    parent.join(format!(".{file_name}.{nonce}.part"))
+    let pid = std::process::id();
+    let counter = DOWNLOAD_COUNTER.fetch_add(1, Ordering::Relaxed);
+    parent.join(format!(".{file_name}.{pid}.{counter}.part"))
 }
 
 /// Internal chunk-increment callback: the probed total is already bound, so
@@ -1279,6 +1279,51 @@ mod tests {
         ));
         let path = dir.join("resource.bin");
         client.download(&format!("{base}/resource"), &path, None).await.unwrap();
+        let downloaded = std::fs::read(&path).unwrap();
+        let entries = std::fs::read_dir(&dir).unwrap().count();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(entries, 1);
+        assert!(downloaded == *data);
+    }
+
+    #[test]
+    fn test_download_temp_paths_are_unique() {
+        // Back-to-back calls land in the same clock tick; the names must
+        // still differ.
+        let path = Path::new("/cache/resource.bin");
+        let names: std::collections::HashSet<_> = (0..10_000)
+            .map(|_| download_temp_path(path))
+            .collect();
+        assert_eq!(names.len(), 10_000);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn test_concurrent_downloads_of_same_resource() {
+        // Concurrent downloads of one resource to one path, as when several
+        // models share a resource in the flat cache: every download succeeds
+        // and the published file is complete, with no temp leftovers.
+        let data = test_payload(3 * 1024 * 1024 + 17);
+        let base = start_server(data.clone(), true);
+        let http = reqwest::Client::new();
+        let dir = std::env::temp_dir().join(format!(
+            "muna-dl-concurrent-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path = dir.join("resource.bin");
+        let downloads = (0..16).map(|_| {
+            let http = http.clone();
+            let url = format!("{base}/resource");
+            let path = path.clone();
+            tokio::spawn(async move {
+                download_with(&http, &url, &path, None, DownloadDurability::Durable, 256 * 1024).await
+            })
+        });
+        for result in futures_util::future::join_all(downloads).await {
+            result.unwrap().unwrap();
+        }
         let downloaded = std::fs::read(&path).unwrap();
         let entries = std::fs::read_dir(&dir).unwrap().count();
         let _ = std::fs::remove_dir_all(&dir);

@@ -1,5 +1,7 @@
 ## 0.0.32
-*INCOMPLETE*
++ Added `PredictionResource::size` field for the resource size in bytes.
++ Removed `PredictionRequirements::disk_bytes` field. Sum `PredictionResource::size` over the prediction's resources instead.
++ Fixed concurrent downloads of the same resource failing with `Failed to move resource` or publishing a partially written file.
 
 ## 0.0.31
 + Added `Device` type for specifying local compute devices.
