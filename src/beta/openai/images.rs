@@ -11,7 +11,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use crate::c;
 use crate::client::{MunaError, Result};
 use crate::services::{PredictionService, PredictorService};
-use crate::types::{Acceleration, Value};
+use crate::types::{Acceleration, Device, Value};
 
 use super::schema::{ImageData, ImageResponse};
 
@@ -62,6 +62,8 @@ pub struct ImageCreateParams {
     pub size: Option<ImageSize>,
     /// Prediction acceleration.
     pub acceleration: Option<Acceleration>,
+    /// Local compute devices.
+    pub devices: Option<Vec<Device>>,
 }
 
 struct ImageConfig {
@@ -127,8 +129,13 @@ impl ImageService {
         }
         let image_idx = config.image_param_idx;
         drop(cache);
-
-        let prediction = self.create_prediction(&tag, prediction_inputs, acceleration).await?;
+        // Create prediction
+        let prediction = self.create_prediction(
+            &tag,
+            prediction_inputs,
+            acceleration,
+            params.devices.as_deref()
+        ).await?;
         if let Some(error) = &prediction.error {
             return Err(MunaError::from_prediction_error(error.clone()));
         }
@@ -222,10 +229,11 @@ impl ImageService {
         tag: &str,
         inputs: HashMap<String, Value>,
         acceleration: Acceleration,
+        devices: Option<&[Device]>,
     ) -> Result<crate::types::Prediction> {
         // `predictions.create` routes remote accelerations internally.
         self.predictions
-            .create(tag, Some(inputs), Some(acceleration), None, None)
+            .create(tag, Some(inputs), Some(acceleration), devices, None, None)
             .await
     }
 }

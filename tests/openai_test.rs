@@ -25,6 +25,7 @@ async fn test_create_embedding() {
             None,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -50,6 +51,7 @@ async fn test_create_embedding_base64() {
             "@google/embedding-gemma",
             None,
             Some(EncodingFormat::Base64),
+            None,
             None,
         )
         .await
@@ -125,6 +127,7 @@ async fn test_generate_image() {
             output_compression: None,
             size: None,
             acceleration: None,
+            devices: None,
         })
         .await
         .unwrap();

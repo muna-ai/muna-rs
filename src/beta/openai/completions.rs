@@ -18,7 +18,7 @@ use crate::c;
 use crate::client::Result;
 use crate::MunaError;
 use crate::services::{PredictionService, PredictorService};
-use crate::types::{self, Acceleration, Dtype, Prediction, Signature, Value};
+use crate::types::{self, Acceleration, Device, Dtype, Prediction, Signature, Value};
 
 use super::inputs::{bind_chat_inputs, ChatInputs};
 use super::schema::{
@@ -73,11 +73,12 @@ impl ChatCompletionService {
         let (
             input_map,
             completion_param_idx,
-            acceleration
+            acceleration,
+            devices
         ) = self.prepare_prediction(params).await?;
         let mut prediction_stream = self
             .predictions
-            .stream(&model, input_map, Some(acceleration))
+            .stream(&model, input_map, Some(acceleration), devices.as_deref())
             .await?;
         let mut chunks = Vec::new();
         while let Some(prediction) = prediction_stream.next().await {
@@ -93,11 +94,12 @@ impl ChatCompletionService {
         let (
             input_map,
             completion_param_idx,
-            acceleration
+            acceleration,
+            devices
         ) = self.prepare_prediction(params).await?;
         let mut prediction_stream = self
             .predictions
-            .stream(&model, input_map, Some(acceleration))
+            .stream(&model, input_map, Some(acceleration), devices.as_deref())
             .await?;
         let stream_model = model.clone();
         let stream = async_stream::try_stream! {
@@ -116,7 +118,7 @@ impl ChatCompletionService {
     async fn prepare_prediction(
         &self,
         mut params: ChatCompletionCreateParams,
-    ) -> Result<(HashMap<String, Value>, usize, Acceleration)> {
+    ) -> Result<(HashMap<String, Value>, usize, Acceleration, Option<Vec<Device>>)> {
         self.ensure_delegate_info(&params.model).await?;
         let info = {
             let cache = self.cache.read().await;
@@ -130,6 +132,7 @@ impl ChatCompletionService {
         };
         let audios = decode_audios(&params.messages, &info)?;
         let acceleration = params.acceleration.take().unwrap_or(Acceleration::LocalAuto);
+        let devices = params.devices.take();
         // Image decoding is CPU-bound (tens of milliseconds per image).
         let inputs = tokio::task::spawn_blocking(move || params.chat_inputs())
             .await
@@ -138,7 +141,7 @@ impl ChatCompletionService {
         if let (false, Some(name)) = (audios.is_empty(), info.audios_param_name) {
             input_map.insert(name, Value::ArrayList(audios));
         }
-        Ok((input_map, info.completion_param_idx, acceleration))
+        Ok((input_map, info.completion_param_idx, acceleration, devices))
     }
 
     async fn ensure_delegate_info(&self, tag: &str) -> Result<()> {

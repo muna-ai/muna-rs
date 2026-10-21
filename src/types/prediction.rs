@@ -67,9 +67,12 @@ pub struct Prediction {
     /// Prediction configuration token.
     #[serde(default)]
     pub configuration: Option<String>,
-    /// Predictor resources.
+    /// Prediction resources.
     #[serde(default)]
     pub resources: Option<Vec<PredictionResource>>,
+    /// Prediction hardware requirements.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requirements: Option<PredictionRequirements>,
     /// Prediction results.
     #[serde(skip)]
     pub results: Option<Vec<Value>>,
@@ -95,6 +98,21 @@ pub struct PredictionResource {
     /// Resource name.
     #[serde(default)]
     pub name: Option<String>,
+}
+
+/// Hardware requirements of a compiled predictor.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PredictionRequirements {
+    /// Number of GPUs the predictor uses. `None` if it requires no GPU.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_count: Option<u32>,
+    /// Required GPU compute architecture (e.g. `sm_100`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_architecture: Option<String>,
+    /// Total size of the predictor's resources in bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_bytes: Option<u64>,
 }
 
 /// Remote prediction result.

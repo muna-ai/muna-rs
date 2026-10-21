@@ -14,7 +14,7 @@ use crate::beta::utils::get_parameter;
 use crate::client::Result;
 use crate::MunaError;
 use crate::services::{PredictionService, PredictorService};
-use crate::types::{Acceleration, Dtype, Parameter, TensorData, Value};
+use crate::types::{Acceleration, Device, Dtype, Parameter, TensorData, Value};
 
 use super::schema::{Embedding, EmbeddingCreateResponse, EmbeddingData, EmbeddingUsage};
 
@@ -62,6 +62,7 @@ impl EmbeddingService {
     /// * `dimensions` - The number of dimensions for Matryoshka embedding models.
     /// * `encoding_format` - The format to return the embeddings in.
     /// * `acceleration` - Prediction acceleration.
+    /// * `devices` - Local compute devices.
     pub async fn create(
         &self,
         input: Vec<String>,
@@ -69,6 +70,7 @@ impl EmbeddingService {
         dimensions: Option<i32>,
         encoding_format: Option<EncodingFormat>,
         acceleration: Option<Acceleration>,
+        devices: Option<&[Device]>,
     ) -> Result<EmbeddingCreateResponse> {
         let input_texts = input;
         // Check that input texts are not empty
@@ -113,7 +115,7 @@ impl EmbeddingService {
         drop(cache);
         let prediction = self
             .predictions
-            .create(model, Some(input_map), Some(acceleration), None, None)
+            .create(model, Some(input_map), Some(acceleration), devices, None, None)
             .await?;
         if let Some(ref error) = prediction.error {
             return Err(MunaError::from_prediction_error(error.clone()));

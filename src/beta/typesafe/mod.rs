@@ -51,7 +51,7 @@ impl TypeSafeClient {
     /// Evaluate a state against a map of typed questions.
     ///
     /// # Arguments
-    /// * `params` - Decision model tag, state, questions, and acceleration.
+    /// * `params` - Decision model tag, state, questions, acceleration, and devices.
     pub async fn system_one(
         &self,
         params: SystemOneCreateParams
@@ -77,7 +77,7 @@ impl TypeSafeClient {
         drop(cache);
         let prediction = self
             .predictions
-            .create(model, Some(input_map), Some(acceleration), None, None)
+            .create(model, Some(input_map), Some(acceleration), params.devices.as_deref(), None, None)
             .await?;
         if let Some(ref error) = prediction.error {
             return Err(MunaError::from_prediction_error(error.clone()));

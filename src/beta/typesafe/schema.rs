@@ -7,7 +7,7 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
 
-use crate::types::Acceleration;
+use crate::types::{Acceleration, Device};
 
 /// Request to evaluate a state against typed questions.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -21,6 +21,9 @@ pub struct SystemOneCreateParams {
     /// Prediction acceleration. Not a wire field.
     #[serde(skip)]
     pub acceleration: Option<Acceleration>,
+    /// Local compute devices. Not a wire field.
+    #[serde(skip)]
+    pub devices: Option<Vec<Device>>,
 }
 
 /// Typed question.

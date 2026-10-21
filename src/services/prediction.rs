@@ -22,7 +22,7 @@ use crate::c;
 use crate::client::{Client, ClientExt, MunaError, RequestInput, Result, SseEvent};
 use crate::hf::{download_hf_file, load_hf_manifest, parse_hf_tag, HfTag};
 use crate::types::{
-    self, Acceleration, Dtype, Prediction, PredictionResource,
+    self, Acceleration, Device, Dtype, Prediction, PredictionResource,
     RemotePrediction, RemoteValue, Value,
 };
 
@@ -85,6 +85,7 @@ impl PredictionService {
         tag: &str,
         inputs: Option<HashMap<String, Value>>,
         acceleration: Option<Acceleration>,
+        devices: Option<&[Device]>,
         client_id: Option<String>,
         configuration_id: Option<String>,
     ) -> Result<Prediction> {
@@ -93,7 +94,7 @@ impl PredictionService {
             is_download_only ||
             is_local_acceleration(acceleration.as_ref());
         if is_local {
-            self.create_local(tag, inputs, acceleration, client_id, configuration_id)
+            self.create_local(tag, inputs, acceleration, devices, client_id, configuration_id)
                 .await
         } else {
             self.create_remote(tag, &inputs.unwrap(), acceleration)
@@ -107,9 +108,10 @@ impl PredictionService {
         tag: &str,
         inputs: HashMap<String, Value>,
         acceleration: Option<Acceleration>,
+        devices: Option<&[Device]>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<Prediction>> + Send>>> {
         if is_local_acceleration(acceleration.as_ref()) {
-            self.stream_local(tag, inputs, acceleration, None, None).await
+            self.stream_local(tag, inputs, acceleration, devices, None, None).await
         } else {
             self.stream_remote(tag, &inputs, acceleration).await
         }
@@ -128,6 +130,7 @@ impl PredictionService {
         tag: &str,
         inputs: Option<HashMap<String, Value>>,
         acceleration: Option<Acceleration>,
+        devices: Option<&[Device]>,
         client_id: Option<String>,
         configuration_id: Option<String>,
     ) -> Result<Prediction> {
@@ -150,7 +153,7 @@ impl PredictionService {
             }
         };
         let predictor = self
-            .load_predictor(tag, &acceleration, client_id, configuration_id)
+            .load_predictor(tag, &acceleration, devices, client_id, configuration_id)
             .await?;
         let input_map = c::ValueMap::from_dict(&inputs)?;
         let prediction = predictor.create_prediction(&input_map)?;
@@ -162,11 +165,12 @@ impl PredictionService {
         tag: &str,
         inputs: HashMap<String, Value>,
         acceleration: Option<Acceleration>,
+        devices: Option<&[Device]>,
         client_id: Option<String>,
         configuration_id: Option<String>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<Prediction>> + Send>>> {
         let predictor = self
-            .load_predictor(tag, &acceleration, client_id, configuration_id)
+            .load_predictor(tag, &acceleration, devices, client_id, configuration_id)
             .await?;
         let tag = tag.to_string();
         let input_map = c::ValueMap::from_dict(&inputs)?;
@@ -267,6 +271,7 @@ impl PredictionService {
         &self,
         tag: &str,
         acceleration: &Option<Acceleration>,
+        devices: Option<&[Device]>,
         client_id: Option<String>,
         configuration_id: Option<String>,
     ) -> Result<Arc<c::Predictor>> {
@@ -293,6 +298,7 @@ impl PredictionService {
         let configuration = self.create_native_configuration(
             tag,
             &acceleration,
+            devices,
             &resolution.prediction
         ).await?;
         let predictor = match c::Predictor::new(&configuration) {
@@ -307,6 +313,7 @@ impl PredictionService {
                 let configuration = self.create_native_configuration(
                     tag,
                     &acceleration,
+                    devices,
                     &resolution.prediction
                 ).await?;
                 c::Predictor::new(&configuration)?
@@ -325,6 +332,7 @@ impl PredictionService {
         &self,
         tag: &str,
         acceleration: &Acceleration,
+        devices: Option<&[Device]>,
         prediction: &Prediction,
     ) -> Result<c::Configuration> {
         // Community predictors on Hugging Face do not have configuration tokens.
@@ -340,6 +348,7 @@ impl PredictionService {
             configuration.set_token(config_token)?;
         }
         configuration.set_acceleration(c::acceleration_to_c(acceleration))?;
+        configuration.set_devices(devices.unwrap_or_default())?;
         if let Some(resources) = &prediction.resources {
             for resource in resources {
                 configuration.add_resource(&resource.kind, &resource.url)?;
@@ -353,6 +362,7 @@ impl PredictionService {
                 &entry.tag,
                 Some(inputs),
                 Some(entry.acceleration.clone()),
+                None,
                 None,
                 None,
             ))
@@ -694,6 +704,7 @@ fn to_prediction(tag: &str, prediction: &c::Prediction) -> Prediction {
         created: chrono_now(),
         configuration: None,
         resources: None,
+        requirements: None,
         results,
         latency: prediction.latency().ok(),
         error: prediction.error().ok().flatten(),
@@ -943,6 +954,7 @@ async fn parse_remote_prediction(
         created: prediction.created,
         configuration: None,
         resources: None,
+        requirements: None,
         results,
         latency: prediction.latency,
         error: prediction.error,
@@ -1006,6 +1018,7 @@ mod tests {
             created: "0".to_string(),
             configuration: Some(configuration),
             resources: None,
+            requirements: None,
             results: None,
             latency: None,
             error: None,
@@ -1290,6 +1303,7 @@ mod tests {
             created: "0".to_string(),
             configuration: None,
             resources: None,
+            requirements: None,
             results: Some(vec![Value::String("endpoint".to_string())]),
             latency: None,
             error: None,

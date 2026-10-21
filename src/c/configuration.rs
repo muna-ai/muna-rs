@@ -6,6 +6,7 @@
 use std::ffi::{c_void, CString};
 
 use crate::client::Result;
+use crate::types::Device;
 
 use super::check_status;
 
@@ -102,16 +103,20 @@ impl Configuration {
     }
 
     /// Set the compute devices.
-    pub fn set_devices(&mut self, devices: &[*const c_void]) -> Result<()> {
+    ///
+    /// The native configuration stores the device pointers
+    /// so the devices must outlive predictor creation.
+    pub fn set_devices(&mut self, devices: &[Device]) -> Result<()> {
         let count = i32::try_from(devices.len()).map_err(|_| {
             crate::client::MunaError::Native(
                 "Cannot set more than i32::MAX configuration devices".to_string(),
             )
         })?;
-        let ptr = if devices.is_empty() {
+        let pointers = devices.iter().map(Device::as_ptr).collect::<Vec<_>>();
+        let ptr = if pointers.is_empty() {
             std::ptr::null()
         } else {
-            devices.as_ptr()
+            pointers.as_ptr()
         };
         let status = unsafe { super::FXNConfigurationSetDevices(self.handle, ptr, count) };
         check_status(status, "Failed to set configuration devices")
@@ -214,6 +219,7 @@ impl Drop for Configuration {
 #[cfg(test)]
 mod tests {
     use super::Configuration;
+    use crate::types::Device;
     use std::ffi::c_void;
 
     #[test]
@@ -236,17 +242,20 @@ mod tests {
         let mut configuration = Configuration::new().unwrap();
         assert!(configuration.devices().unwrap().is_empty());
 
-        let first = 0u8;
-        let second = 0u8;
+        let handle = 0u8;
         let devices = [
-            std::ptr::from_ref(&first).cast::<c_void>(),
-            std::ptr::from_ref(&second).cast::<c_void>(),
+            Device::cuda(4),
+            Device::from_pointer(std::ptr::from_ref(&handle).cast::<c_void>()),
+            Device::cuda(5),
         ];
         configuration.set_devices(&devices).unwrap();
+        let pointers = configuration.devices().unwrap();
         assert_eq!(
-            configuration.devices().unwrap(),
-            devices.map(|device| device.cast_mut()).to_vec()
+            pointers,
+            devices.iter().map(|device| device.as_ptr().cast_mut()).collect::<Vec<_>>()
         );
+        assert_eq!(unsafe { *pointers[0].cast::<i32>() }, 4);
+        assert_eq!(unsafe { *pointers[2].cast::<i32>() }, 5);
 
         configuration.set_devices(&[]).unwrap();
         assert!(configuration.devices().unwrap().is_empty());

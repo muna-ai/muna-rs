@@ -18,7 +18,7 @@ use crate::beta::openai::{
 use crate::client::Result;
 use crate::MunaError;
 use crate::services::{PredictionService, PredictorService};
-use crate::types::{self, Acceleration, Dtype, Prediction, Signature, Value};
+use crate::types::{self, Acceleration, Device, Dtype, Prediction, Signature, Value};
 
 use super::schema::{
     ContentBlock, ContentBlockDelta, ContentBlockParam, ImageSource, Message,
@@ -87,11 +87,12 @@ impl MessageService {
         let (
             input_map,
             output_param_idx,
-            acceleration
+            acceleration,
+            devices
         ) = self.prepare_prediction(params).await?;
         let prediction_stream = self
             .predictions
-            .stream(&model, input_map, Some(acceleration))
+            .stream(&model, input_map, Some(acceleration), devices.as_deref())
             .await?;
         let outputs = gather_prediction_outputs(
             prediction_stream,
@@ -104,7 +105,7 @@ impl MessageService {
     async fn prepare_prediction(
         &self,
         mut params: MessageCreateParams,
-    ) -> Result<(HashMap<String, Value>, usize, Acceleration)> {
+    ) -> Result<(HashMap<String, Value>, usize, Acceleration, Option<Vec<Device>>)> {
         self.ensure_delegate_info(&params.model).await?;
         let info = {
             let cache = self.cache.read().await;
@@ -117,12 +118,13 @@ impl MessageService {
             })?
         };
         let acceleration = params.acceleration.take().unwrap_or(Acceleration::LocalAuto);
+        let devices = params.devices.take();
         // Image decoding is CPU-bound (tens of milliseconds per image).
         let inputs = tokio::task::spawn_blocking(move || params.chat_inputs())
             .await
             .map_err(|e| MunaError::Prediction(format!("Failed to prepare chat inputs: {e}")))??;
         let input_map = bind_chat_inputs(inputs, &info.signature)?;
-        Ok((input_map, info.output_param_idx, acceleration))
+        Ok((input_map, info.output_param_idx, acceleration, devices))
     }
 
     async fn ensure_delegate_info(&self, tag: &str) -> Result<()> {

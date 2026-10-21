@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::Acceleration;
+use crate::types::{Acceleration, Device};
 
 /// Reason that the model stopped generating.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -388,4 +388,7 @@ pub struct MessageCreateParams {
     /// Prediction acceleration. Not a wire field.
     #[serde(skip)]
     pub acceleration: Option<Acceleration>,
+    /// Local compute devices. Not a wire field.
+    #[serde(skip)]
+    pub devices: Option<Vec<Device>>,
 }

@@ -33,6 +33,7 @@ async fn test_system_one() {
             }))
             .unwrap(),
             acceleration: None,
+            devices: None,
         })
         .await
         .unwrap();

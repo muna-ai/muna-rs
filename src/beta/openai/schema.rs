@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::{Acceleration, Image};
+use crate::types::{Acceleration, Device, Image};
 
 /// Chat message content: a plain string or a list of content parts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -451,6 +451,9 @@ pub struct ChatCompletionCreateParams {
     /// Prediction acceleration. Not a wire field.
     #[serde(skip)]
     pub acceleration: Option<Acceleration>,
+    /// Local compute devices. Not a wire field.
+    #[serde(skip)]
+    pub devices: Option<Vec<Device>>,
 }
 
 /// Embedding data, either as float values or base64-encoded bytes.
