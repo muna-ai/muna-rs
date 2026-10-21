@@ -1,3 +1,6 @@
+## 0.0.33
+*INCOMPLETE*
+
 ## 0.0.32
 + Added `PredictionResource::size` field for the resource size in bytes.
 + Removed `PredictionRequirements::disk_bytes` field. Sum `PredictionResource::size` over the prediction's resources instead.
