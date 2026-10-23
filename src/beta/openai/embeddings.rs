@@ -115,7 +115,7 @@ impl EmbeddingService {
         drop(cache);
         let prediction = self
             .predictions
-            .create(model, Some(input_map), Some(acceleration), devices, None, None)
+            .create(model, Some(input_map), Some(acceleration), devices, None, None, None)
             .await?;
         if let Some(ref error) = prediction.error {
             return Err(MunaError::from_prediction_error(error.clone()));

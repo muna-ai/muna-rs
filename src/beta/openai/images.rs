@@ -233,7 +233,7 @@ impl ImageService {
     ) -> Result<crate::types::Prediction> {
         // `predictions.create` routes remote accelerations internally.
         self.predictions
-            .create(tag, Some(inputs), Some(acceleration), devices, None, None)
+            .create(tag, Some(inputs), Some(acceleration), devices, None, None, None)
             .await
     }
 }

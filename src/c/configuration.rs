@@ -189,17 +189,33 @@ impl Configuration {
         Ok(id)
     }
 
-    /// Get the client identifier.
-    pub fn get_client_id() -> Result<String> {
+    /// Get the current target triple.
+    pub fn get_target() -> Result<String> {
         let mut buffer = vec![0u8; 64];
         let status = unsafe {
-            super::FXNConfigurationGetClientID(buffer.as_mut_ptr() as *mut _, buffer.len() as i32)
+            super::FXNConfigurationGetTarget(buffer.as_mut_ptr() as *mut _, buffer.len() as i32)
         };
-        check_status(status, "Failed to get client ID")?;
-        let id = unsafe { std::ffi::CStr::from_ptr(buffer.as_ptr() as *const _) }
+        check_status(status, "Failed to get target")?;
+        let target = unsafe { std::ffi::CStr::from_ptr(buffer.as_ptr() as *const _) }
             .to_string_lossy()
             .into_owned();
-        Ok(id)
+        Ok(target)
+    }
+
+    /// Get the current GPU compute architecture, or `None` without a supported GPU.
+    pub fn get_compute_architecture() -> Result<Option<String>> {
+        let mut buffer = vec![0u8; 16];
+        let status = unsafe {
+            super::FXNConfigurationGetComputeArchitecture(
+                buffer.as_mut_ptr() as *mut _,
+                buffer.len() as i32
+            )
+        };
+        check_status(status, "Failed to get compute architecture")?;
+        let architecture = unsafe { std::ffi::CStr::from_ptr(buffer.as_ptr() as *const _) }
+            .to_string_lossy()
+            .into_owned();
+        Ok((!architecture.is_empty()).then_some(architecture))
     }
 
     pub(crate) fn handle(&self) -> *mut c_void {

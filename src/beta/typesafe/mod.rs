@@ -77,7 +77,15 @@ impl TypeSafeClient {
         drop(cache);
         let prediction = self
             .predictions
-            .create(model, Some(input_map), Some(acceleration), params.devices.as_deref(), None, None)
+            .create(
+                model,
+                Some(input_map),
+                Some(acceleration),
+                params.devices.as_deref(),
+                None,
+                None,
+                None
+            )
             .await?;
         if let Some(ref error) = prediction.error {
             return Err(MunaError::from_prediction_error(error.clone()));

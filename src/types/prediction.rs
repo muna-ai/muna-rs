@@ -110,9 +110,6 @@ pub struct PredictionRequirements {
     /// Number of GPUs the predictor uses. `None` if it requires no GPU.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu_count: Option<u32>,
-    /// Required GPU compute architecture (e.g. `sm_100`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub gpu_architecture: Option<String>,
 }
 
 /// Remote prediction result.

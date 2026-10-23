@@ -96,7 +96,11 @@ extern "C" {
         buffer: *mut c_char,
         size: c_int
     ) -> c_int;
-    pub(crate) fn FXNConfigurationGetClientID(
+    pub(crate) fn FXNConfigurationGetTarget(
+        buffer: *mut c_char,
+        size: c_int
+    ) -> c_int;
+    pub(crate) fn FXNConfigurationGetComputeArchitecture(
         buffer: *mut c_char,
         size: c_int
     ) -> c_int;

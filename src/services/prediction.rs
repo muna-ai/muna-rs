@@ -45,6 +45,7 @@ struct LoadedPredictor {
 struct PredictionCacheKey {
     tag: String,
     target: String,
+    compute_architecture: Option<String>,
     configuration_id: Option<String>,
 }
 
@@ -86,7 +87,8 @@ impl PredictionService {
         inputs: Option<HashMap<String, Value>>,
         acceleration: Option<Acceleration>,
         devices: Option<&[Device]>,
-        client_id: Option<String>,
+        target: Option<String>,
+        compute_architecture: Option<String>,
         configuration_id: Option<String>,
     ) -> Result<Prediction> {
         let is_download_only = inputs.as_ref().is_some_and(HashMap::is_empty);
@@ -94,8 +96,16 @@ impl PredictionService {
             is_download_only ||
             is_local_acceleration(acceleration.as_ref());
         if is_local {
-            self.create_local(tag, inputs, acceleration, devices, client_id, configuration_id)
-                .await
+            self.create_local(
+                tag,
+                inputs,
+                acceleration,
+                devices,
+                target,
+                compute_architecture,
+                configuration_id
+            )
+            .await
         } else {
             self.create_remote(tag, &inputs.unwrap(), acceleration)
                 .await
@@ -111,7 +121,7 @@ impl PredictionService {
         devices: Option<&[Device]>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<Prediction>> + Send>>> {
         if is_local_acceleration(acceleration.as_ref()) {
-            self.stream_local(tag, inputs, acceleration, devices, None, None).await
+            self.stream_local(tag, inputs, acceleration, devices, None, None, None).await
         } else {
             self.stream_remote(tag, &inputs, acceleration).await
         }
@@ -131,7 +141,8 @@ impl PredictionService {
         inputs: Option<HashMap<String, Value>>,
         acceleration: Option<Acceleration>,
         devices: Option<&[Device]>,
-        client_id: Option<String>,
+        target: Option<String>,
+        compute_architecture: Option<String>,
         configuration_id: Option<String>,
     ) -> Result<Prediction> {
         let inputs = match inputs {
@@ -140,7 +151,7 @@ impl PredictionService {
                     return self.create_hf_prediction(&hf_tag).await;
                 }
                 let prediction = self
-                    .create_raw_prediction(tag, client_id, configuration_id)
+                    .create_raw_prediction(tag, target, compute_architecture, configuration_id)
                     .await?;
                 self.create_cached_prediction(&prediction).await?;
                 return Ok(prediction);
@@ -148,12 +159,19 @@ impl PredictionService {
             Some(inputs) => inputs,
             None => {
                 return self
-                    .create_raw_prediction(tag, client_id, configuration_id)
+                    .create_raw_prediction(tag, target, compute_architecture, configuration_id)
                     .await
             }
         };
         let predictor = self
-            .load_predictor(tag, &acceleration, devices, client_id, configuration_id)
+            .load_predictor(
+                tag,
+                &acceleration,
+                devices,
+                target,
+                compute_architecture,
+                configuration_id
+            )
             .await?;
         let input_map = c::ValueMap::from_dict(&inputs)?;
         let prediction = predictor.create_prediction(&input_map)?;
@@ -166,11 +184,19 @@ impl PredictionService {
         inputs: HashMap<String, Value>,
         acceleration: Option<Acceleration>,
         devices: Option<&[Device]>,
-        client_id: Option<String>,
+        target: Option<String>,
+        compute_architecture: Option<String>,
         configuration_id: Option<String>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<Prediction>> + Send>>> {
         let predictor = self
-            .load_predictor(tag, &acceleration, devices, client_id, configuration_id)
+            .load_predictor(
+                tag,
+                &acceleration,
+                devices,
+                target,
+                compute_architecture,
+                configuration_id
+            )
             .await?;
         let tag = tag.to_string();
         let input_map = c::ValueMap::from_dict(&inputs)?;
@@ -192,12 +218,12 @@ impl PredictionService {
     ) -> Result<Prediction> {
         let acceleration = acceleration.unwrap_or(Acceleration::RemoteAuto);
         let input_map = serialize_inputs(inputs)?;
-        let client_id = c::Configuration::get_client_id().unwrap_or_else(|_| "rust".to_string());
+        let target = c::Configuration::get_target().unwrap_or_else(|_| "rust".to_string());
         let body = serde_json::json!({
             "tag": tag,
             "inputs": input_map,
             "acceleration": acceleration,
-            "clientId": client_id,
+            "target": target,
         });
         let remote: RemotePrediction = self
             .client
@@ -214,12 +240,12 @@ impl PredictionService {
     ) -> Result<Pin<Box<dyn Stream<Item = Result<Prediction>> + Send>>> {
         let acceleration = acceleration.unwrap_or(Acceleration::RemoteAuto);
         let input_map = serialize_inputs(inputs)?;
-        let client_id = c::Configuration::get_client_id().unwrap_or_else(|_| "rust".to_string());
+        let target = c::Configuration::get_target().unwrap_or_else(|_| "rust".to_string());
         let body = serde_json::json!({
             "tag": tag,
             "inputs": input_map,
             "acceleration": acceleration,
-            "clientId": client_id,
+            "target": target,
             "stream": true,
         });
         let event_stream = self
@@ -240,10 +266,11 @@ impl PredictionService {
     async fn create_raw_prediction(
         &self,
         tag: &str,
-        client_id: Option<String>,
+        target: Option<String>,
+        compute_architecture: Option<String>,
         configuration_id: Option<String>,
     ) -> Result<Prediction> {
-        let key = prediction_cache_key(tag, client_id, configuration_id);
+        let key = prediction_cache_key(tag, target, compute_architecture, configuration_id);
         self.request_raw_prediction(&key, None).await
     }
 
@@ -254,7 +281,8 @@ impl PredictionService {
     ) -> Result<Prediction> {
         let mut body = serde_json::json!({
             "tag": key.tag,
-            "clientId": key.target,
+            "target": key.target,
+            "computeArchitecture": key.compute_architecture,
         });
         if let Some(configuration_id) = &key.configuration_id {
             body["configurationId"] = serde_json::Value::String(configuration_id.clone());
@@ -272,10 +300,11 @@ impl PredictionService {
         tag: &str,
         acceleration: &Option<Acceleration>,
         devices: Option<&[Device]>,
-        client_id: Option<String>,
+        target: Option<String>,
+        compute_architecture: Option<String>,
         configuration_id: Option<String>,
     ) -> Result<Arc<c::Predictor>> {
-        let key = prediction_cache_key(tag, client_id, configuration_id);
+        let key = prediction_cache_key(tag, target, compute_architecture, configuration_id);
         if let Some(loaded) = self.cache.read().await.get(&key).cloned() {
             self.refresh_loaded_prediction(&key, &loaded).await;
             return Ok(loaded.predictor);
@@ -354,6 +383,7 @@ impl PredictionService {
                 &entry.tag,
                 Some(inputs),
                 Some(entry.acceleration.clone()),
+                None,
                 None,
                 None,
                 None,
@@ -619,16 +649,20 @@ impl PredictionService {
 
 fn prediction_cache_key(
     tag: &str,
-    client_id: Option<String>,
+    target: Option<String>,
+    compute_architecture: Option<String>,
     configuration_id: Option<String>,
 ) -> PredictionCacheKey {
-    let target = client_id
-        .or_else(|| c::Configuration::get_client_id().ok())
+    let target = target
+        .or_else(|| c::Configuration::get_target().ok())
         .unwrap_or_else(|| "rust".to_string());
+    let compute_architecture = compute_architecture
+        .or_else(|| c::Configuration::get_compute_architecture().ok().flatten());
     let configuration_id = configuration_id.or_else(|| c::Configuration::get_unique_id().ok());
     PredictionCacheKey {
         tag: tag.to_string(),
         target,
+        compute_architecture,
         configuration_id,
     }
 }
@@ -1000,6 +1034,7 @@ mod tests {
         PredictionCacheKey {
             tag: "@user/model".to_string(),
             target: target.to_string(),
+            compute_architecture: None,
             configuration_id: Some(configuration_id.to_string()),
         }
     }
@@ -1183,7 +1218,7 @@ mod tests {
     }
 
     #[test]
-    fn cache_key_includes_target_and_configuration_identity() {
+    fn cache_key_includes_target_architecture_and_configuration_identity() {
         assert_ne!(
             cache_key("linux-x86_64", "device-a"),
             cache_key("linux-aarch64", "device-a")
@@ -1192,6 +1227,15 @@ mod tests {
             cache_key("linux-x86_64", "device-a"),
             cache_key("linux-x86_64", "device-b")
         );
+        let hopper = PredictionCacheKey {
+            compute_architecture: Some("sm_90".to_string()),
+            ..cache_key("linux-x86_64", "device-a")
+        };
+        let blackwell = PredictionCacheKey {
+            compute_architecture: Some("sm_100".to_string()),
+            ..cache_key("linux-x86_64", "device-a")
+        };
+        assert_ne!(hopper, blackwell);
     }
 
     #[tokio::test]
