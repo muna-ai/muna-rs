@@ -1,5 +1,5 @@
 ## 0.0.34
-*INCOMPLETE*
++ Minor improvements.
 
 ## 0.0.33
 + Added `compute_architecture` parameter to `muna.predictions.create` method for overriding the detected compute architecture (e.g. `sm_100`, `gfx942`, `metal4`).

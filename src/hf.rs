@@ -11,6 +11,9 @@ use serde::{Deserialize, Serialize};
 use crate::client::{download, DownloadDurability, MunaError, Result};
 use crate::types::{Prediction, Signature};
 
+/// Predictor manifest file in a Hugging Face repository.
+const HF_MANIFEST: &str = "config.json";
+
 /// Hugging Face predictor tag.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct HfTag {
@@ -54,12 +57,11 @@ pub fn parse_hf_tag(tag: &str) -> Option<HfTag> {
 }
 
 /// Load a predictor manifest from Hugging Face.
+///
+/// The manifest is `config.json`, one of the files the Hub counts downloads by.
 pub async fn load_hf_manifest(hf_tag: &HfTag) -> Result<HfManifest> {
-    let manifest_path = download_hf_file(
-        &hf_tag.repo_id,
-        "muna.json",
-        hf_tag.revision.as_deref(),
-    ).await?;
+    let revision = hf_tag.revision.as_deref();
+    let manifest_path = download_hf_file(&hf_tag.repo_id, HF_MANIFEST, revision).await?;
     let data = tokio::fs::read(&manifest_path)
         .await
         .map_err(|e| MunaError::Prediction(format!("Failed to read Hugging Face manifest: {e}")))?;
@@ -408,8 +410,8 @@ mod tests {
     #[test]
     fn builds_resolve_urls() {
         assert_eq!(
-            hf_file_url("owner/repo", "muna.json", "main").unwrap(),
-            "https://huggingface.co/owner/repo/resolve/main/muna.json"
+            hf_file_url("owner/repo", "config.json", "main").unwrap(),
+            "https://huggingface.co/owner/repo/resolve/main/config.json"
         );
         assert_eq!(
             hf_file_url("owner/repo", "dir/a b.bin", "refs/pr/1").unwrap(),
