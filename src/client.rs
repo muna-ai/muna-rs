@@ -105,8 +105,10 @@ struct CreateResourceMultipartResponse {
 
 /// HTTP request input.
 pub struct RequestInput {
-    /// Request path, relative to the client's API URL (e.g. `/predictions`).
+    /// Request path, relative to `base_url` or the client's API URL (e.g. `/predictions`).
     pub path: String,
+    /// Override the client's API base URL for this request.
+    pub base_url: Option<String>,
     /// HTTP method.
     pub method: Method,
     /// Additional request headers. `Authorization` and `Content-Type` are
@@ -120,6 +122,7 @@ impl RequestInput {
     pub fn get(path: impl Into<String>) -> Self {
         Self {
             path: path.into(),
+            base_url: None,
             method: Method::GET,
             headers: None,
             body: None,
@@ -129,6 +132,7 @@ impl RequestInput {
     pub fn post(path: impl Into<String>) -> Self {
         Self {
             path: path.into(),
+            base_url: None,
             method: Method::POST,
             headers: None,
             body: None,
@@ -138,10 +142,17 @@ impl RequestInput {
     pub fn delete(path: impl Into<String>) -> Self {
         Self {
             path: path.into(),
+            base_url: None,
             method: Method::DELETE,
             headers: None,
             body: None,
         }
+    }
+
+    /// Set the destination base URL (including its API version prefix).
+    pub fn base_url(mut self, base_url: impl Into<String>) -> Self {
+        self.base_url = Some(base_url.into());
+        self
     }
 
     pub fn body(mut self, body: serde_json::Value) -> Self {
@@ -172,7 +183,8 @@ pub type DownloadProgressFn = Arc<dyn Fn(u64, Option<u64>) + Send + Sync>;
 /// Muna API client interface.
 ///
 /// Mirrors the muna-unity `MunaClient` abstract base: `request` / `stream` /
-/// `download` / `upload` primitives with client-owned `url` and `cache_path`.
+/// `download` / `upload` primitives with client-owned `url`, `inference_url`
+/// and `cache_path`.
 /// All methods are required; custom clients wrap the default [`MunaClient`]
 /// and forward the methods they do not change.
 ///
@@ -183,6 +195,9 @@ pub type DownloadProgressFn = Arc<dyn Fn(u64, Option<u64>) + Send + Sync>;
 pub trait Client: Send + Sync {
     /// Muna API URL.
     fn url(&self) -> &str;
+
+    /// Base URL used by remote prediction calls.
+    fn inference_url(&self) -> &str;
 
     /// Muna cache path.
     fn cache_path(&self) -> &Path;
@@ -247,6 +262,8 @@ impl<C: Client + ?Sized> ClientExt for C {}
 pub struct MunaClient {
     /// Muna API URL.
     pub url: String,
+    /// Remote inference base URL; defaults to MUNA_INFERENCE_URL or the hosted fleet.
+    pub inference_url: String,
     auth: String,
     http: reqwest::Client,
     cache_dir: PathBuf,
@@ -272,7 +289,9 @@ impl MunaClient {
             .build()
             .expect("failed to build reqwest client");
         let cache_dir = get_cache_dir();
-        Self { url, auth, http, cache_dir }
+        let inference_url = std::env::var("MUNA_INFERENCE_URL")
+            .unwrap_or_else(|_| "https://inference.muna.ai/v1".into());
+        Self { url, inference_url, auth, http, cache_dir }
     }
 
     /// Muna cache path.
@@ -295,7 +314,8 @@ impl MunaClient {
 
     /// Make a request to a REST endpoint.
     pub async fn request<T: DeserializeOwned>(&self, input: RequestInput) -> Result<T> {
-        let url = format!("{}{}", self.url, input.path);
+        let base = input.base_url.as_deref().unwrap_or(&self.url);
+        let url = format!("{}{}", base.trim_end_matches('/'), input.path);
         let mut builder = self
             .http
             .request(input.method, &url)
@@ -332,7 +352,8 @@ impl MunaClient {
         &self,
         input: RequestInput,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<SseEvent<T>>> + Send>>> {
-        let url = format!("{}{}", self.url, input.path);
+        let base = input.base_url.as_deref().unwrap_or(&self.url);
+        let url = format!("{}{}", base.trim_end_matches('/'), input.path);
         let mut builder = self
             .http
             .request(input.method, &url)
@@ -535,7 +556,8 @@ impl MunaClient {
 
     /// Make a request to a REST endpoint, discarding any response body.
     async fn request_no_content(&self, input: RequestInput) -> Result<()> {
-        let url = format!("{}{}", self.url, input.path);
+        let base = input.base_url.as_deref().unwrap_or(&self.url);
+        let url = format!("{}{}", base.trim_end_matches('/'), input.path);
         let mut builder = self
             .http
             .request(input.method, &url)
@@ -770,6 +792,10 @@ impl Client for MunaClient {
 
     fn url(&self) -> &str {
         &self.url
+    }
+
+    fn inference_url(&self) -> &str {
+        &self.inference_url
     }
 
     fn cache_path(&self) -> &Path {
@@ -1017,10 +1043,75 @@ async fn upload_part(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::StreamExt;
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::Arc;
     use std::thread;
+
+    #[tokio::test]
+    async fn inference_requests_use_a_separate_host_from_metadata() {
+        let api = start_server(Arc::new(br#"{"host":"api"}"#.to_vec()), false);
+        let inference = start_server(Arc::new(br#"{"host":"node"}"#.to_vec()), false);
+        let mut client = MunaClient::new(None, Some(&format!("{api}/v1/")));
+        client.inference_url = format!("{inference}/v1/");
+        let metadata: serde_json::Value = client
+            .request(RequestInput::post("/predictions"))
+            .await
+            .unwrap();
+        let execution: serde_json::Value = client
+            .request(RequestInput::post("/predictions").base_url(client.inference_url()))
+            .await
+            .unwrap();
+        assert_eq!(metadata["host"], "api");
+        assert_eq!(execution["host"], "node");
+    }
+
+    #[tokio::test]
+    async fn base_url_override_is_general_and_does_not_change_client_defaults() {
+        let api = start_server(Arc::new(br#"{"host":"api"}"#.to_vec()), false);
+        let other = start_server(Arc::new(br#"{"host":"override"}"#.to_vec()), false);
+        let events = start_server(
+            Arc::new(b"event: prediction\ndata: {\"host\":\"stream\"}\n\n".to_vec()),
+            false,
+        );
+        let client = MunaClient::new(None, Some(&api));
+        let overridden: serde_json::Value = client
+            .request(RequestInput::get("/custom").base_url(format!("{other}/v1/")))
+            .await
+            .unwrap();
+        assert_eq!(overridden["host"], "override");
+        let mut stream = client
+            .stream::<serde_json::Value>(
+                RequestInput::post("/custom-stream").base_url(format!("{events}/v1/")),
+            )
+            .await
+            .unwrap();
+        assert_eq!(stream.next().await.unwrap().unwrap().data["host"], "stream");
+        assert!(stream.next().await.is_none());
+        // The no-content request path must honor the same destination override.
+        let no_content_client = MunaClient::new(None, Some("http://127.0.0.1:0"));
+        no_content_client
+            .request_no_content(RequestInput::delete("/custom").base_url(other))
+            .await
+            .unwrap();
+        let default: serde_json::Value =
+            client.request(RequestInput::get("/custom")).await.unwrap();
+        assert_eq!(default["host"], "api");
+        let default_stream = start_server(
+            Arc::new(b"data: {\"host\":\"api-stream\"}\n\n".to_vec()),
+            false,
+        );
+        let client = MunaClient::new(None, Some(&default_stream));
+        let mut stream = client
+            .stream::<serde_json::Value>(RequestInput::get("/events"))
+            .await
+            .unwrap();
+        assert_eq!(
+            stream.next().await.unwrap().unwrap().data["host"],
+            "api-stream"
+        );
+    }
 
     #[test]
     fn caller_fault_strips_class_prefix() {

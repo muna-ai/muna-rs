@@ -530,3 +530,71 @@ pub struct ImageResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<ImageUsage>,
 }
+
+/// Speech output encoding, matching muna-py's supported formats.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SpeechResponseFormat {
+    #[default]
+    Mp3,
+    Opus,
+    Aac,
+    Flac,
+    Wav,
+    Pcm,
+}
+
+impl SpeechResponseFormat {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Mp3  => "mp3",
+            Self::Opus => "opus",
+            Self::Aac  => "aac",
+            Self::Flac => "flac",
+            Self::Wav  => "wav",
+            Self::Pcm  => "pcm",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SpeechStreamFormat {
+    #[default]
+    Audio,
+    Sse,
+}
+
+/// Generated audio bytes and HTTP-style metadata, matching the Python adapter.
+#[derive(Debug)]
+pub struct SpeechCreateResponse {
+    pub content: Vec<u8>,
+    pub response: reqwest::Response,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TranscriptionInputTokenDetails {
+    pub audio_tokens: u64,
+    pub text_tokens: u64,
+}
+
+/// Audio content usage; duration is independent of prediction latency.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum TranscriptionUsage {
+    Tokens {
+        input_tokens: u64,
+        output_tokens: u64,
+        total_tokens: u64,
+        input_token_details: TranscriptionInputTokenDetails,
+    },
+    Duration {
+        seconds: f64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Transcription {
+    pub text: String,
+    pub usage: TranscriptionUsage,
+}

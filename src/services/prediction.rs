@@ -227,7 +227,11 @@ impl PredictionService {
         });
         let remote: RemotePrediction = self
             .client
-            .request_as(RequestInput::post("/predictions/remote").body(body))
+            .request_as(
+                RequestInput::post("/predictions")
+                    .base_url(self.client.inference_url())
+                    .body(body),
+            )
             .await?;
         parse_remote_prediction(&*self.client, remote).await
     }
@@ -250,7 +254,11 @@ impl PredictionService {
         });
         let event_stream = self
             .client
-            .stream_as::<RemotePrediction>(RequestInput::post("/predictions/remote").body(body))
+            .stream_as::<RemotePrediction>(
+                RequestInput::post("/predictions")
+                    .base_url(self.client.inference_url())
+                    .body(body),
+            )
             .await?;
         let client = self.client.clone();
         let stream = async_stream::try_stream! {
@@ -628,7 +636,7 @@ impl PredictionService {
         Ok(Prediction {
             configuration: None,
             resources: Some(resources),
-            created: chrono_now(),
+            created: created_timestamp(SystemTime::now()),
             ..manifest.prediction
         })
     }
@@ -715,6 +723,8 @@ fn is_local_acceleration(acceleration: Option<&Acceleration>) -> bool {
 }
 
 fn to_prediction(tag: &str, prediction: &c::Prediction) -> Prediction {
+    // Anchor completion before potentially expensive native-output copies.
+    let created = created_timestamp(SystemTime::now());
     let results = prediction.results().ok().map(|map| {
         let size = map.len();
         (0..size)
@@ -728,7 +738,7 @@ fn to_prediction(tag: &str, prediction: &c::Prediction) -> Prediction {
     Prediction {
         id: prediction.id().unwrap_or_default(),
         tag: tag.to_string(),
-        created: chrono_now(),
+        created,
         configuration: None,
         resources: None,
         requirements: None,
@@ -760,8 +770,9 @@ fn preload_output<'a>(prediction: &'a Prediction, tag: &str) -> Result<&'a str> 
     }
 }
 
-fn chrono_now() -> String {
-    unix_now().to_string()
+fn created_timestamp(time: SystemTime) -> String {
+    chrono::DateTime::<chrono::Utc>::from(time)
+        .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
 }
 
 fn unix_now() -> i64 {
@@ -1013,8 +1024,8 @@ struct TokenTimingClaims {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_preload_claim, preload_output, token_refresh_at, unix_now, DiskCachedPrediction,
-        PredictionCacheKey, PredictionService, PreloadEntry,
+        created_timestamp, parse_preload_claim, preload_output, token_refresh_at, unix_now,
+        DiskCachedPrediction, PredictionCacheKey, PredictionService, PreloadEntry,
     };
     use crate::client::{Client, MunaClient, MunaError, RequestInput, Result, SseStream};
     use crate::types::{Acceleration, Prediction, PredictionResource, Value};
@@ -1022,6 +1033,16 @@ mod tests {
     use base64::Engine;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
+
+    #[test]
+    fn prediction_created_preserves_nanoseconds_in_utc() {
+        let time = std::time::UNIX_EPOCH + std::time::Duration::new(1_700_000_000, 123_456_789);
+        assert_eq!(created_timestamp(time), "2023-11-14T22:13:20.123456789Z");
+        assert_eq!(
+            created_timestamp(std::time::UNIX_EPOCH),
+            "1970-01-01T00:00:00.000000000Z"
+        );
+    }
 
     fn token(payload: serde_json::Value) -> String {
         format!(
@@ -1087,6 +1108,10 @@ mod tests {
     impl Client for FakeClient {
         fn url(&self) -> &str {
             "http://fake.invalid"
+        }
+
+        fn inference_url(&self) -> &str {
+            "http://inference.fake.invalid/v1"
         }
 
         fn cache_path(&self) -> &Path {

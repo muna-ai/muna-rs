@@ -20,9 +20,11 @@ version = "0.0.51"
 async-stream = "0.3"
 async-trait = "0.1.92"
 base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 futures-core = "0.3"
 futures-util = "0.3"
 home = "0.5.12"
+http = "1"
 indexmap = { version = "2", features = ["serde"] }
 reqwest = { version = "0.12", default-features = false, features = [
     "json",
