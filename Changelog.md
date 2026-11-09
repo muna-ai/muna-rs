@@ -1,3 +1,6 @@
+## 0.0.36
+*INCOMPLETE*
+
 ## 0.0.35
 + Added OpenAI-compatible `muna.beta.openai.audio.speech` speech generation client.
 + Added OpenAI-compatible `muna.beta.openai.audio.transcriptions` audio transcription client.
