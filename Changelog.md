@@ -1,5 +1,5 @@
 ## 0.0.36
-*INCOMPLETE*
++ Updated Function to 0.0.52.
 
 ## 0.0.35
 + Added OpenAI-compatible `muna.beta.openai.audio.speech` speech generation client.
