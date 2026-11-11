@@ -1,5 +1,5 @@
 ## 0.0.37
-*INCOMPLETE*
++ Added `muna.beta.openai.images.edit` with encoded or decoded reference images.
 
 ## 0.0.36
 + Updated Function to 0.0.52.
