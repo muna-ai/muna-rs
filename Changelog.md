@@ -1,3 +1,6 @@
+## 0.0.38
+*INCOMPLETE*
+
 ## 0.0.37
 + Added `muna.beta.openai.images.edit` method for use with generative image models that edit images.
 
