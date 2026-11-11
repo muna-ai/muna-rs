@@ -1,5 +1,5 @@
 ## 0.0.37
-+ Added `muna.beta.openai.images.edit` with encoded or decoded reference images.
++ Added `muna.beta.openai.images.edit` method for use with generative image models that edit images.
 
 ## 0.0.36
 + Updated Function to 0.0.52.
