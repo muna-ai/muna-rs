@@ -26,7 +26,6 @@ pub enum TensorData {
 }
 
 impl TensorData {
-
     pub fn dtype(&self) -> Dtype {
         match self {
             Self::Float32(_) => Dtype::Float32,
@@ -127,11 +126,34 @@ pub enum Value {
     Binary(Vec<u8>),
 }
 
+/// Encoded leaf data or a sequence of typed remote values.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum RemoteData {
+    Encoded(String),
+    Sequence(Vec<RemoteValue>),
+}
+
+impl RemoteData {
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Self::Encoded(data) => Some(data),
+            Self::Sequence(_) => None,
+        }
+    }
+}
+
+impl From<String> for RemoteData {
+    fn from(data: String) -> Self {
+        Self::Encoded(data)
+    }
+}
+
 /// Remote value.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteValue {
-    /// Data URL or base64 data URI.
-    pub data: Option<String>,
+    /// Value data.
+    pub data: Option<RemoteData>,
     /// Value data type.
     pub dtype: Dtype,
 }
@@ -169,5 +191,26 @@ impl From<String> for Value {
 impl From<&str> for Value {
     fn from(v: &str) -> Self {
         Value::String(v.to_string())
+    }
+}
+
+#[cfg(test)]
+mod remote_tests {
+    use super::*;
+
+    #[test]
+    fn remote_data_accepts_legacy_and_composed_payloads() {
+        for json in [
+            serde_json::json!({"dtype":"image_list", "data":"data:image/avif;base64,AAAA"}),
+            serde_json::json!({"dtype":"image_list", "data":[{"dtype":"image", "data":"data:image/jpeg;base64,AAAA"}]}),
+            serde_json::json!({"dtype":"null", "data":null}),
+        ] {
+            let value: RemoteValue = serde_json::from_value(json.clone()).unwrap();
+            assert_eq!(serde_json::to_value(value).unwrap(), json);
+        }
+        assert!(serde_json::from_value::<RemoteValue>(
+            serde_json::json!({"dtype":"image", "data":42})
+        )
+        .is_err());
     }
 }

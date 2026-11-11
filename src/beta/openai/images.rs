@@ -9,9 +9,10 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 
 use crate::c;
-use crate::client::{MunaError, Result};
+use crate::client::{ClientExt, MunaError, RequestInput, Result};
+use crate::services::{create_remote_value, is_local_acceleration};
 use crate::services::{PredictionService, PredictorService};
-use crate::types::{Acceleration, Device, Dtype, Signature, Value};
+use crate::types::{Acceleration, Device, Dtype, RemoteData, RemoteValue, Signature, Value};
 
 use super::schema::{ImageData, ImageResponse};
 
@@ -112,7 +113,6 @@ struct ImageConfig {
 }
 
 impl ImageConfig {
-
     fn from_signature(signature: &Signature, edit: bool) -> Result<Self> {
         let required: Vec<_> = signature
             .inputs
@@ -199,6 +199,47 @@ impl ImageConfig {
         })
     }
 
+    fn bind_remote(
+        &self,
+        params: &ImageCreateParams,
+        image: Option<Vec<ImageInput>>,
+    ) -> Result<serde_json::Value> {
+        // Reuse scalar binding and validation without decoding image files.
+        let mut scalars = self.clone();
+        scalars.input_image = None;
+        let mut inputs = scalars
+            .bind(params, None)?
+            .iter()
+            .map(|(name, value)| Ok((name.clone(), create_remote_value(value)?)))
+            .collect::<Result<HashMap<String, RemoteValue>>>()?;
+        if let Some((name, dtype)) = &self.input_image {
+            let images = image
+                .ok_or_else(|| MunaError::InvalidInput("Input images are required.".into()))?;
+            if images.is_empty()
+                || images.len() > 1024
+                || (*dtype == Dtype::Image && images.len() != 1)
+            {
+                return Err(MunaError::InvalidInput(
+                    "Invalid number of input images.".into(),
+                ));
+            }
+            let mut images = images
+                .into_iter()
+                .map(encoded_remote_image)
+                .collect::<Result<Vec<_>>>()?;
+            let value = if *dtype == Dtype::Image {
+                images.remove(0)
+            } else {
+                RemoteValue {
+                    dtype: Dtype::ImageList,
+                    data: Some(RemoteData::Sequence(images)),
+                }
+            };
+            inputs.insert(name.clone(), value);
+        }
+        Ok(serde_json::to_value(inputs)?)
+    }
+
     fn bind(
         &self,
         params: &ImageCreateParams,
@@ -246,6 +287,100 @@ impl ImageConfig {
     }
 }
 
+// File bytes remain unchanged. Function sniffs the actual format at decode time.
+fn encoded_remote_image(input: ImageInput) -> Result<RemoteValue> {
+    let (bytes, mime) = match input {
+        ImageInput::Encoded(bytes) if !bytes.is_empty() => (bytes, "image/*"),
+        ImageInput::Encoded(_) => {
+            return Err(MunaError::InvalidInput("Image file is empty.".into()))
+        }
+        ImageInput::Pixels(image) => (
+            c::Value::from_object(&Value::Image(image))?.serialize(Some("image/png"))?,
+            "image/png",
+        ),
+    };
+    Ok(RemoteValue {
+        dtype: Dtype::Image,
+        data: Some(format!("data:{mime};base64,{}", BASE64.encode(bytes)).into()),
+    })
+}
+
+fn image_response(images: Vec<ImageData>) -> ImageResponse {
+    let created = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    ImageResponse {
+        data: Some(images),
+        background: Some("opaque".into()),
+        created,
+        usage: None,
+    }
+}
+
+fn encoded_image_results(
+    prediction: crate::types::RemotePrediction,
+    image_idx: usize,
+    format: &str,
+    quality: Option<i32>,
+) -> Result<ImageResponse> {
+    if let Some(error) = prediction.error {
+        return Err(MunaError::from_prediction_error(error));
+    }
+    let value = prediction
+        .results
+        .as_ref()
+        .and_then(|values| values.get(image_idx))
+        .ok_or_else(|| MunaError::Prediction("No image results returned.".into()))?;
+    if value.dtype != Dtype::ImageList {
+        return Err(MunaError::Prediction("Invalid image-list output.".into()));
+    }
+    let items = match &value.data {
+        Some(RemoteData::Sequence(items)) if items.len() <= 1024 => items,
+        // A plain SDK client has no server-specific encoding policy. Preserve
+        // compatibility with legacy sequence responses in that case.
+        Some(RemoteData::Encoded(url)) => {
+            let encoded = url.strip_prefix("data:image/avif;base64,").ok_or_else(|| {
+                MunaError::Prediction("Invalid legacy image-list encoding.".into())
+            })?;
+            let bytes = BASE64.decode(encoded).map_err(|error| {
+                MunaError::Prediction(format!("Invalid image-list data: {error}"))
+            })?;
+            let decoded = c::Value::from_bytes(&bytes, "image/avif")?.to_object()?;
+            let Value::ImageList(images) = decoded else {
+                return Err(MunaError::Prediction("Invalid image-list output.".into()));
+            };
+            return Ok(image_response(
+                images
+                    .iter()
+                    .map(|image| ImageService::encode_image(image, format, quality))
+                    .collect::<Result<_>>()?,
+            ));
+        }
+        _ => return Err(MunaError::Prediction("Invalid image-list output.".into())),
+    };
+    let prefix = format!("data:image/{format};base64,");
+    let images = items
+        .iter()
+        .map(|item| {
+            let data = item
+                .data
+                .as_ref()
+                .and_then(RemoteData::as_str)
+                .filter(|_| item.dtype == Dtype::Image)
+                .and_then(|url| url.strip_prefix(&prefix))
+                .ok_or_else(|| {
+                    MunaError::Prediction("Node returned an unexpected image encoding.".into())
+                })?;
+            Ok(ImageData {
+                b64_json: Some(data.to_owned()),
+                image: None,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(image_response(images))
+}
+
 fn decode_image(input: ImageInput) -> Result<crate::types::Image> {
     match input {
         ImageInput::Pixels(image) => Ok(image),
@@ -277,7 +412,6 @@ pub struct ImageService {
 }
 
 impl ImageService {
-
     pub fn new(predictors: PredictorService, predictions: PredictionService) -> Self {
         Self {
             predictors,
@@ -327,10 +461,66 @@ impl ImageService {
                 config
             }
         };
-        let prediction_inputs = config.bind(&params, image)?;
         let output_format = params.output_format.as_deref().unwrap_or("png");
-        let acceleration = params.acceleration.unwrap_or(Acceleration::LocalAuto);
+        if !matches!(output_format, "png" | "jpeg" | "webp" | "raw") {
+            return Err(MunaError::InvalidInput(
+                "Unsupported image output format.".into(),
+            ));
+        }
+        if params
+            .output_compression
+            .is_some_and(|quality| !(0..=100).contains(&quality))
+        {
+            return Err(MunaError::InvalidInput(
+                "Image output compression must be between 0 and 100.".into(),
+            ));
+        }
+        let acceleration = params
+            .acceleration
+            .clone()
+            .unwrap_or(Acceleration::LocalAuto);
         let image_idx = config.image_param_idx;
+        if !is_local_acceleration(Some(&acceleration)) && output_format != "raw" {
+            let inputs = config.bind_remote(&params, image)?;
+            // Keep remote results encoded. Application Client wrappers own
+            // request policy (headers, routing, and prediction billing capture).
+            let client = &self.predictions.client;
+            let target = c::Configuration::get_target().unwrap_or_else(|_| "rust".to_string());
+            let mut prediction: crate::types::RemotePrediction = client
+                .request_as(
+                    RequestInput::post("/predictions")
+                        .base_url(client.inference_url())
+                        .body(serde_json::json!({
+                            "tag": tag,
+                            "inputs": inputs,
+                            "acceleration": acceleration,
+                            "target": target,
+                        })),
+                )
+                .await?;
+            // Legacy backends may reference a resource instead of returning
+            // inline AVIF. Fetch through the caller's existing Client contract.
+            if let Some(value) = prediction
+                .results
+                .as_mut()
+                .and_then(|values| values.get_mut(image_idx))
+            {
+                if let Some(RemoteData::Encoded(url)) = &value.data {
+                    if !url.starts_with("data:") {
+                        let bytes = client.fetch(url).await?;
+                        value.data =
+                            Some(format!("data:image/avif;base64,{}", BASE64.encode(bytes)).into());
+                    }
+                }
+            }
+            return encoded_image_results(
+                prediction,
+                image_idx,
+                output_format,
+                params.output_compression,
+            );
+        }
+        let prediction_inputs = config.bind(&params, image)?;
         // Create prediction
         let prediction = self
             .create_prediction(
@@ -355,7 +545,11 @@ impl ImageService {
             Value::ImageList(list) => {
                 let mut image_data = Vec::new();
                 for img in list {
-                    image_data.push(Self::encode_image(img, output_format)?);
+                    image_data.push(Self::encode_image(
+                        img,
+                        output_format,
+                        params.output_compression,
+                    )?);
                 }
                 image_data
             }
@@ -377,7 +571,11 @@ impl ImageService {
         })
     }
 
-    fn encode_image(image: &crate::types::Image, output_format: &str) -> Result<ImageData> {
+    fn encode_image(
+        image: &crate::types::Image,
+        output_format: &str,
+        quality: Option<i32>,
+    ) -> Result<ImageData> {
         if output_format == "raw" {
             return Ok(ImageData {
                 b64_json: None,
@@ -385,7 +583,10 @@ impl ImageService {
             });
         }
         let fxn_value = c::Value::from_object(&Value::Image(image.clone()))?;
-        let mime = format!("image/{output_format}");
+        let mut mime = format!("image/{output_format}");
+        if let Some(quality) = quality {
+            mime.push_str(&format!(";q={:.2}", quality as f32 / 100.0));
+        }
         let buffer = fxn_value.serialize(Some(&mime))?;
         Ok(ImageData {
             b64_json: Some(BASE64.encode(&buffer)),
@@ -529,5 +730,80 @@ mod tests {
         assert_eq!(decoded.data[0], 255);
         assert!(decode_image(Vec::<u8>::new().into()).is_err());
         assert!(decode_image(b"invalid image".to_vec().into()).is_err());
+    }
+    #[test]
+    fn remote_binding_preserves_encoded_files_without_decoding() {
+        let config = ImageConfig::from_signature(&signature(Some("image_list")), true).unwrap();
+        // Intentionally undecodable: binding must not touch any image codec.
+        let original = b"original JPEG bytes".to_vec();
+        let inputs = config
+            .bind_remote(
+                &ImageCreateParams::default(),
+                Some(vec![
+                    original.clone().into(),
+                    b"second file".to_vec().into(),
+                ]),
+            )
+            .unwrap();
+        let url = inputs["source"]["data"][0]["data"].as_str().unwrap();
+        assert_eq!(
+            BASE64
+                .decode(url.split_once(";base64,").unwrap().1)
+                .unwrap(),
+            original
+        );
+        assert_eq!(inputs["source"]["data"].as_array().unwrap().len(), 2);
+        assert!(config
+            .bind_remote(&ImageCreateParams::default(), Some(vec![]))
+            .is_err());
+        let scalar = ImageConfig::from_signature(&signature(Some("image")), true).unwrap();
+        assert!(scalar
+            .bind_remote(
+                &ImageCreateParams::default(),
+                Some(vec![b"a".to_vec().into(), b"b".to_vec().into()])
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn remote_results_pass_through_without_an_image_codec() {
+        let prediction: crate::types::RemotePrediction = serde_json::from_value(json!({
+            "id":"pred_test", "tag":"@a/albedo", "created":"2026-11-11T00:00:00Z", "latency":0.4,
+            "results":[{"dtype":"image_list", "data":[
+                {"dtype":"image", "data":"data:image/jpeg;base64,b3JpZ2luYWw="},
+                {"dtype":"image", "data":"data:image/jpeg;base64,c2Vjb25k"}
+            ]}]
+        }))
+        .unwrap();
+        let result = encoded_image_results(prediction.clone(), 0, "jpeg", None).unwrap();
+        let data = result.data.unwrap();
+        assert_eq!(data[0].b64_json.as_deref(), Some("b3JpZ2luYWw="));
+        assert_eq!(data[1].b64_json.as_deref(), Some("c2Vjb25k"));
+        assert!(encoded_image_results(prediction, 0, "png", None).is_err());
+    }
+    #[test]
+    fn plain_client_can_still_convert_legacy_avif_results() {
+        let bytes = c::Value::from_object(&Value::ImageList(vec![image(80), image(160)]))
+            .unwrap()
+            .serialize(None)
+            .unwrap();
+        let prediction = serde_json::from_value(json!({
+            "id":"pred_legacy", "tag":"@a/albedo", "created":"2026-11-11T00:00:00Z", "latency":0.4,
+            "results":[{"dtype":"image_list", "data":format!("data:image/avif;base64,{}", BASE64.encode(bytes))}]
+        })).unwrap();
+        let result = encoded_image_results(prediction, 0, "jpeg", Some(90)).unwrap();
+        let images = result.data.unwrap();
+        assert_eq!(images.len(), 2);
+        for image in images {
+            let bytes = BASE64.decode(image.b64_json.unwrap()).unwrap();
+            assert!(bytes.starts_with(&[0xff, 0xd8]));
+            assert!(matches!(
+                c::Value::from_bytes(&bytes, "image/jpeg")
+                    .unwrap()
+                    .to_object()
+                    .unwrap(),
+                Value::Image(_)
+            ));
+        }
     }
 }

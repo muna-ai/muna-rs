@@ -8,12 +8,12 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use base64::Engine;
 use base64::engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD};
+use base64::Engine;
 use futures_core::Stream;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, RwLock};
@@ -22,14 +22,14 @@ use crate::c;
 use crate::client::{Client, ClientExt, MunaError, RequestInput, Result, SseEvent};
 use crate::hf::{download_hf_file, load_hf_manifest, parse_hf_tag, HfTag};
 use crate::types::{
-    self, Acceleration, Device, Dtype, Prediction, PredictionResource,
+    self, Acceleration, Device, Dtype, Prediction, PredictionResource, RemoteData,
     RemotePrediction, RemoteValue, Value,
 };
 
 /// Make predictions.
 #[derive(Clone)]
 pub struct PredictionService {
-    client: Arc<dyn Client>,
+    pub(crate) client: Arc<dyn Client>,
     cache: Arc<RwLock<HashMap<PredictionCacheKey, LoadedPredictor>>>,
     operation_locks: Arc<Mutex<HashMap<PredictionCacheKey, Arc<Mutex<()>>>>>,
     cache_dir: PathBuf,
@@ -92,9 +92,8 @@ impl PredictionService {
         configuration_id: Option<String>,
     ) -> Result<Prediction> {
         let is_download_only = inputs.as_ref().is_some_and(HashMap::is_empty);
-        let is_local = inputs.is_none() ||
-            is_download_only ||
-            is_local_acceleration(acceleration.as_ref());
+        let is_local =
+            inputs.is_none() || is_download_only || is_local_acceleration(acceleration.as_ref());
         if is_local {
             self.create_local(
                 tag,
@@ -103,7 +102,7 @@ impl PredictionService {
                 devices,
                 target,
                 compute_architecture,
-                configuration_id
+                configuration_id,
             )
             .await
         } else {
@@ -121,7 +120,8 @@ impl PredictionService {
         devices: Option<&[Device]>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<Prediction>> + Send>>> {
         if is_local_acceleration(acceleration.as_ref()) {
-            self.stream_local(tag, inputs, acceleration, devices, None, None, None).await
+            self.stream_local(tag, inputs, acceleration, devices, None, None, None)
+                .await
         } else {
             self.stream_remote(tag, &inputs, acceleration).await
         }
@@ -170,7 +170,7 @@ impl PredictionService {
                 devices,
                 target,
                 compute_architecture,
-                configuration_id
+                configuration_id,
             )
             .await?;
         let input_map = c::ValueMap::from_dict(&inputs)?;
@@ -195,7 +195,7 @@ impl PredictionService {
                 devices,
                 target,
                 compute_architecture,
-                configuration_id
+                configuration_id,
             )
             .await?;
         let tag = tag.to_string();
@@ -332,11 +332,9 @@ impl PredictionService {
             },
             None => self.get_or_refresh_prediction(&key, false).await?,
         };
-        let configuration = self.create_native_configuration(
-            &acceleration,
-            devices,
-            &resolution.prediction
-        ).await?;
+        let configuration = self
+            .create_native_configuration(&acceleration, devices, &resolution.prediction)
+            .await?;
         let predictor = match c::Predictor::new(&configuration) {
             Ok(predictor) => predictor,
             Err(error) if hf_tag.is_some() => return Err(error),
@@ -346,11 +344,9 @@ impl PredictionService {
                 // the complete cache entry and perform one unpinned refetch.
                 self.invalidate_prediction_cache(&key).await;
                 resolution = self.get_or_refresh_prediction(&key, true).await?;
-                let configuration = self.create_native_configuration(
-                    &acceleration,
-                    devices,
-                    &resolution.prediction
-                ).await?;
+                let configuration = self
+                    .create_native_configuration(&acceleration, devices, &resolution.prediction)
+                    .await?;
                 c::Predictor::new(&configuration)?
             }
         };
@@ -626,8 +622,8 @@ impl PredictionService {
         let mut resources = Vec::new();
         for resource in manifest.prediction.resources.iter().flatten() {
             let filename = resource.url.rsplit('/').next().unwrap_or(&resource.url);
-            let path = download_hf_file(&hf_tag.repo_id, filename, hf_tag.revision.as_deref())
-                .await?;
+            let path =
+                download_hf_file(&hf_tag.repo_id, filename, hf_tag.revision.as_deref()).await?;
             resources.push(PredictionResource {
                 url: path.to_string_lossy().into_owned(),
                 ..resource.clone()
@@ -688,11 +684,9 @@ fn parse_preload_claim(config_token: Option<&str>) -> Vec<PreloadEntry> {
         .unwrap_or_default()
 }
 
-fn token_refresh_at(
-    prediction: &Prediction,
-    cached_at: i64,
-) -> Option<i64> {
-    let claims = parse_configuration_claims::<TokenTimingClaims>(prediction.configuration.as_deref()?)?;
+fn token_refresh_at(prediction: &Prediction, cached_at: i64) -> Option<i64> {
+    let claims =
+        parse_configuration_claims::<TokenTimingClaims>(prediction.configuration.as_deref()?)?;
     let exp = claims.exp?;
     let issued_at = claims.iat.unwrap_or(cached_at);
     let lifetime = exp.saturating_sub(issued_at);
@@ -708,7 +702,7 @@ fn prediction_cache_hash(key: &PredictionCacheKey) -> u64 {
     hasher.finish()
 }
 
-fn is_local_acceleration(acceleration: Option<&Acceleration>) -> bool {
+pub(crate) fn is_local_acceleration(acceleration: Option<&Acceleration>) -> bool {
     match acceleration {
         Some(
             Acceleration::LocalAuto
@@ -771,8 +765,7 @@ fn preload_output<'a>(prediction: &'a Prediction, tag: &str) -> Result<&'a str> 
 }
 
 fn created_timestamp(time: SystemTime) -> String {
-    chrono::DateTime::<chrono::Utc>::from(time)
-        .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
+    chrono::DateTime::<chrono::Utc>::from(time).to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
 }
 
 fn unix_now() -> i64 {
@@ -793,7 +786,7 @@ fn serialize_inputs(inputs: &HashMap<String, Value>) -> Result<serde_json::Value
     Ok(serde_json::Value::Object(map))
 }
 
-fn create_remote_value(value: &Value) -> Result<RemoteValue> {
+pub(crate) fn create_remote_value(value: &Value) -> Result<RemoteValue> {
     match value {
         Value::Null => Ok(RemoteValue {
             data: None,
@@ -840,14 +833,14 @@ fn create_remote_value(value: &Value) -> Result<RemoteValue> {
             let data = upload_value_data(&buffer, "application/octet-stream");
             let dtype = tensor.data.dtype();
             Ok(RemoteValue {
-                data: Some(data),
+                data: Some(data.into()),
                 dtype,
             })
         }
         Value::String(s) => {
             let data = upload_value_data(s.as_bytes(), "text/plain");
             Ok(RemoteValue {
-                data: Some(data),
+                data: Some(data.into()),
                 dtype: Dtype::String,
             })
         }
@@ -855,7 +848,7 @@ fn create_remote_value(value: &Value) -> Result<RemoteValue> {
             let json = serde_json::to_string(v)?;
             let data = upload_value_data(json.as_bytes(), "application/json");
             Ok(RemoteValue {
-                data: Some(data),
+                data: Some(data.into()),
                 dtype: Dtype::List,
             })
         }
@@ -863,7 +856,7 @@ fn create_remote_value(value: &Value) -> Result<RemoteValue> {
             let json = serde_json::to_string(v)?;
             let data = upload_value_data(json.as_bytes(), "application/json");
             Ok(RemoteValue {
-                data: Some(data),
+                data: Some(data.into()),
                 dtype: Dtype::Dict,
             })
         }
@@ -872,7 +865,7 @@ fn create_remote_value(value: &Value) -> Result<RemoteValue> {
             let buffer = fxn_value.serialize(None)?;
             let data = upload_value_data(&buffer, "image/png");
             Ok(RemoteValue {
-                data: Some(data),
+                data: Some(data.into()),
                 dtype: Dtype::Image,
             })
         }
@@ -881,7 +874,7 @@ fn create_remote_value(value: &Value) -> Result<RemoteValue> {
             let buffer = fxn_value.serialize(None)?;
             let data = upload_value_data(&buffer, "application/x-npz");
             Ok(RemoteValue {
-                data: Some(data),
+                data: Some(data.into()),
                 dtype: Dtype::ArrayList,
             })
         }
@@ -890,14 +883,14 @@ fn create_remote_value(value: &Value) -> Result<RemoteValue> {
             let buffer = fxn_value.serialize(None)?;
             let data = upload_value_data(&buffer, "image/avif");
             Ok(RemoteValue {
-                data: Some(data),
+                data: Some(data.into()),
                 dtype: Dtype::ImageList,
             })
         }
         Value::Binary(bytes) => {
             let data = upload_value_data(bytes, "application/octet-stream");
             Ok(RemoteValue {
-                data: Some(data),
+                data: Some(data.into()),
                 dtype: Dtype::Binary,
             })
         }
@@ -922,12 +915,45 @@ async fn download_value_data(client: &dyn Client, url: &str) -> Result<Vec<u8>> 
 }
 
 async fn parse_remote_value(client: &dyn Client, rv: &RemoteValue) -> Result<Value> {
+    if let Some(RemoteData::Sequence(items)) = &rv.data {
+        if rv.dtype != Dtype::ImageList || items.len() > 1024 {
+            return Err(MunaError::InvalidInput(
+                "Only image_list supports composed data (at most 1024 images).".into(),
+            ));
+        }
+        let mut images = Vec::with_capacity(items.len());
+        for item in items {
+            let url = item
+                .data
+                .as_ref()
+                .and_then(RemoteData::as_str)
+                .filter(|_| item.dtype == Dtype::Image)
+                .ok_or_else(|| {
+                    MunaError::InvalidInput("Image lists require encoded image children.".into())
+                })?;
+            let buffer = download_value_data(client, url).await?;
+            match c::Value::from_bytes(&buffer, "image/*")
+                .and_then(|value| value.to_object())
+                .map_err(|error| MunaError::InvalidInput(format!("Cannot decode image: {error}")))?
+            {
+                Value::Image(image) => images.push(image),
+                _ => {
+                    return Err(MunaError::InvalidInput(
+                        "Child did not decode to an image.".into(),
+                    ))
+                }
+            }
+        }
+        return Ok(Value::ImageList(images));
+    }
+
     if rv.dtype == Dtype::Null {
         return Ok(Value::Null);
     }
     let url = rv
         .data
-        .as_deref()
+        .as_ref()
+        .and_then(RemoteData::as_str)
         .ok_or_else(|| MunaError::Prediction("Remote value has no data URL".into()))?;
     let buffer = download_value_data(client, url).await?;
     match rv.dtype {
@@ -1027,8 +1053,10 @@ mod tests {
         created_timestamp, parse_preload_claim, preload_output, token_refresh_at, unix_now,
         DiskCachedPrediction, PredictionCacheKey, PredictionService, PreloadEntry,
     };
+    use super::{parse_remote_value, upload_value_data};
     use crate::client::{Client, MunaClient, MunaError, RequestInput, Result, SseStream};
     use crate::types::{Acceleration, Prediction, PredictionResource, Value};
+    use crate::{c, types, Dtype, RemoteData, RemoteValue};
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use base64::Engine;
     use std::path::{Path, PathBuf};
@@ -1147,6 +1175,41 @@ mod tests {
         async fn upload(&self, _path: &Path) -> Result<String> {
             Err(MunaError::Prediction("fake client has no API".into()))
         }
+    }
+
+    #[tokio::test]
+    async fn composed_remote_images_decode_without_avif() {
+        let client = FakeClient {
+            cache_dir: PathBuf::new(),
+            downloads: Default::default(),
+        };
+        let image = types::Image {
+            data: vec![20, 40, 60],
+            width: 1,
+            height: 1,
+            channels: 3,
+        };
+        let bytes = c::Value::from_object(&Value::Image(image.clone()))
+            .unwrap()
+            .serialize(Some("image/png"))
+            .unwrap();
+        let child = RemoteValue {
+            dtype: Dtype::Image,
+            data: Some(upload_value_data(&bytes, "image/png").into()),
+        };
+        let remote = RemoteValue {
+            dtype: Dtype::ImageList,
+            data: Some(RemoteData::Sequence(vec![child.clone(), child])),
+        };
+        match parse_remote_value(&client, &remote).await.unwrap() {
+            Value::ImageList(images) => assert_eq!(images, vec![image.clone(), image]),
+            _ => panic!("expected image list"),
+        }
+        let invalid = RemoteValue {
+            dtype: Dtype::ImageList,
+            data: Some(RemoteData::Sequence(vec![remote])),
+        };
+        assert!(parse_remote_value(&client, &invalid).await.is_err());
     }
 
     #[test]
