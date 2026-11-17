@@ -205,6 +205,9 @@ impl Value {
     /// Create a native value from a Rust `Value`.
     pub fn from_object(obj: &types::Value) -> Result<Self> {
         match obj {
+            types::Value::Remote(_) => Err(crate::client::MunaError::InvalidInput(
+                "Encoded values must be decoded before entering native code.".into()
+            )),
             types::Value::Null => Self::create_null(),
             types::Value::Int(v) => {
                 let data = [*v];

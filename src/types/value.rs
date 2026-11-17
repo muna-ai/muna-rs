@@ -124,6 +124,8 @@ pub enum Value {
     ImageList(Vec<Image>),
     ArrayList(Vec<Tensor>),
     Binary(Vec<u8>),
+    /// Encoded wire value, forwarded remotely or decoded before local execution.
+    Remote(RemoteValue),
 }
 
 /// Encoded leaf data or a sequence of typed remote values.
@@ -156,6 +158,12 @@ pub struct RemoteValue {
     pub data: Option<RemoteData>,
     /// Value data type.
     pub dtype: Dtype,
+}
+
+impl From<RemoteValue> for Value {
+    fn from(value: RemoteValue) -> Self {
+        Self::Remote(value)
+    }
 }
 
 impl From<f32> for Value {

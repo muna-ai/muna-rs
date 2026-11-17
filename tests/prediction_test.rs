@@ -14,7 +14,7 @@ async fn test_create_raw_prediction() {
     let muna = Muna::default();
     let prediction = muna
         .predictions
-        .create("@fxn/greeting", None, None, None, None, None, None)
+        .create("@fxn/greeting", None, None, None, None, None, None, None)
         .await
         .unwrap();
     assert!(prediction.configuration.is_some());
@@ -35,6 +35,7 @@ async fn test_empty_inputs_download_and_cache_resources() {
             None,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -50,7 +51,7 @@ async fn test_create_prediction() {
     inputs.insert("radius".to_string(), 4.0f32.into());
     let prediction = muna
         .predictions
-        .create("@yusuf/area", Some(inputs), None, None, None, None, None)
+        .create("@yusuf/area", Some(inputs), None, None, None, None, None, None)
         .await
         .unwrap();
     assert!(prediction.results.is_some());
@@ -66,7 +67,7 @@ async fn test_stream_prediction() {
     inputs.insert("sentence".to_string(), "The fat cat sat on the mat.".into());
     let mut stream = muna
         .predictions
-        .stream("@yusuf/generator", inputs, None, None)
+        .stream("@yusuf/generator", inputs, None, None, None)
         .await
         .unwrap();
     let mut count = 0;
@@ -88,7 +89,7 @@ async fn test_create_remote_prediction() {
     inputs.insert("sentence".to_string(), "The fat cat sat on the mat.".into());
     let prediction = muna
         .predictions
-        .create("@yusuf/generator", Some(inputs), None, None, None, None, None)
+        .create("@yusuf/generator", Some(inputs), None, None, None, None, None, None)
         .await
         .unwrap();
     assert!(prediction.results.is_some());
@@ -110,6 +111,7 @@ async fn test_stream_remote_prediction() {
             inputs,
             Some(muna::Acceleration::RemoteCpu),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -130,7 +132,7 @@ async fn test_create_invalid_prediction() {
     let muna = Muna::default();
     let result = muna
         .predictions
-        .create("@yusu/invalid-predictor", None, None, None, None, None, None)
+        .create("@yusu/invalid-predictor", None, None, None, None, None, None, None)
         .await;
     assert!(result.is_err());
     let err = result.unwrap_err();

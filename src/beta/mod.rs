@@ -5,6 +5,7 @@
 
 mod client;
 mod utils;
+pub mod adapters;
 pub mod anthropic;
 pub mod openai;
 pub mod typesafe;

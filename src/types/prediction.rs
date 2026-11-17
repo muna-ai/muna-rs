@@ -74,7 +74,11 @@ pub struct Prediction {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requirements: Option<PredictionRequirements>,
     /// Prediction results.
-    #[serde(skip)]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_results",
+        serialize_with = "serialize_results"
+    )]
     pub results: Option<Vec<Value>>,
     /// Prediction latency in milliseconds.
     #[serde(default)]
@@ -112,32 +116,29 @@ pub struct PredictionRequirements {
     pub gpu_count: Option<u32>,
 }
 
-/// Remote prediction result.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RemotePrediction {
-    /// Prediction ID.
-    pub id: String,
-    /// Predictor tag.
-    pub tag: String,
-    /// Date created.
-    pub created: String,
-    /// Prediction results.
-    #[serde(default)]
-    pub results: Option<Vec<RemoteValue>>,
-    /// Prediction latency in milliseconds.
-    #[serde(default)]
-    pub latency: Option<f64>,
-    /// Prediction error.
-    #[serde(default)]
-    pub error: Option<String>,
-    /// Prediction logs.
-    #[serde(default)]
-    pub logs: Option<String>,
+// JSON prediction results arrive encoded. Decoding requires the configured
+// client (for resource URLs), so PredictionService performs that step explicitly.
+fn deserialize_results<'de, D>(deserializer: D) -> Result<Option<Vec<Value>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<Vec<RemoteValue>>::deserialize(deserializer)?
+        .map(|results| results.into_iter().map(Value::Remote).collect()))
 }
 
-/// Remote prediction SSE event.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct RemotePredictionEvent {
-    pub event: String,
-    pub data: RemotePrediction,
+fn serialize_results<S>(results: &Option<Vec<Value>>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    results
+        .as_ref()
+        .map(|results| {
+            results
+                .iter()
+                .map(crate::services::create_remote_value)
+                .collect::<crate::client::Result<Vec<_>>>()
+        })
+        .transpose()
+        .map_err(serde::ser::Error::custom)?
+        .serialize(serializer)
 }

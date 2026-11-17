@@ -1,5 +1,5 @@
 ## 0.0.39
-*INCOMPLETE*
++ Minor improvements.
 
 ## 0.0.38
 + Minor improvements.

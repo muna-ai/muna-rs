@@ -23,7 +23,7 @@ use crate::client::{Client, ClientExt, MunaError, RequestInput, Result, SseEvent
 use crate::hf::{download_hf_file, load_hf_manifest, parse_hf_tag, HfTag};
 use crate::types::{
     self, Acceleration, Device, Dtype, Prediction, PredictionResource, RemoteData,
-    RemotePrediction, RemoteValue, Value,
+    RemoteValue, Value,
 };
 
 /// Make predictions.
@@ -80,7 +80,8 @@ impl PredictionService {
         }
     }
 
-    /// Create a prediction.
+    /// Create a prediction. `passthrough` defaults to false; when true, remote
+    /// results remain `Value::Remote` without fetching or decoding payloads.
     pub async fn create(
         &self,
         tag: &str,
@@ -90,6 +91,7 @@ impl PredictionService {
         target: Option<String>,
         compute_architecture: Option<String>,
         configuration_id: Option<String>,
+        passthrough: Option<bool>,
     ) -> Result<Prediction> {
         let is_download_only = inputs.as_ref().is_some_and(HashMap::is_empty);
         let is_local =
@@ -106,24 +108,26 @@ impl PredictionService {
             )
             .await
         } else {
-            self.create_remote(tag, &inputs.unwrap(), acceleration)
+            self.create_remote(tag, &inputs.unwrap(), acceleration, passthrough.unwrap_or(false))
                 .await
         }
     }
 
-    /// Stream a prediction.
+    /// Stream a prediction. `passthrough` retains encoded remote results for
+    /// every event; local execution always returns native values.
     pub async fn stream(
         &self,
         tag: &str,
         inputs: HashMap<String, Value>,
         acceleration: Option<Acceleration>,
         devices: Option<&[Device]>,
+        passthrough: Option<bool>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<Prediction>> + Send>>> {
         if is_local_acceleration(acceleration.as_ref()) {
             self.stream_local(tag, inputs, acceleration, devices, None, None, None)
                 .await
         } else {
-            self.stream_remote(tag, &inputs, acceleration).await
+            self.stream_remote(tag, &inputs, acceleration, passthrough.unwrap_or(false)).await
         }
     }
 
@@ -163,6 +167,7 @@ impl PredictionService {
                     .await
             }
         };
+        let inputs = deserialize_inputs(&*self.client, inputs).await?;
         let predictor = self
             .load_predictor(
                 tag,
@@ -188,6 +193,7 @@ impl PredictionService {
         compute_architecture: Option<String>,
         configuration_id: Option<String>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<Prediction>> + Send>>> {
+        let inputs = deserialize_inputs(&*self.client, inputs).await?;
         let predictor = self
             .load_predictor(
                 tag,
@@ -215,6 +221,7 @@ impl PredictionService {
         tag: &str,
         inputs: &HashMap<String, Value>,
         acceleration: Option<Acceleration>,
+        passthrough: bool,
     ) -> Result<Prediction> {
         let acceleration = acceleration.unwrap_or(Acceleration::RemoteAuto);
         let input_map = serialize_inputs(inputs)?;
@@ -225,7 +232,7 @@ impl PredictionService {
             "acceleration": acceleration,
             "target": target,
         });
-        let remote: RemotePrediction = self
+        let remote: Prediction = self
             .client
             .request_as(
                 RequestInput::post("/predictions")
@@ -233,7 +240,7 @@ impl PredictionService {
                     .body(body),
             )
             .await?;
-        parse_remote_prediction(&*self.client, remote).await
+        parse_remote_prediction(&*self.client, remote, passthrough).await
     }
 
     async fn stream_remote(
@@ -241,6 +248,7 @@ impl PredictionService {
         tag: &str,
         inputs: &HashMap<String, Value>,
         acceleration: Option<Acceleration>,
+        passthrough: bool,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<Prediction>> + Send>>> {
         let acceleration = acceleration.unwrap_or(Acceleration::RemoteAuto);
         let input_map = serialize_inputs(inputs)?;
@@ -254,7 +262,7 @@ impl PredictionService {
         });
         let event_stream = self
             .client
-            .stream_as::<RemotePrediction>(
+            .stream_as::<Prediction>(
                 RequestInput::post("/predictions")
                     .base_url(self.client.inference_url())
                     .body(body),
@@ -263,8 +271,8 @@ impl PredictionService {
         let client = self.client.clone();
         let stream = async_stream::try_stream! {
             for await event in event_stream {
-                let event: SseEvent<RemotePrediction> = event?;
-                let prediction = parse_remote_prediction(&*client, event.data).await?;
+                let event: SseEvent<Prediction> = event?;
+                let prediction = parse_remote_prediction(&*client, event.data, passthrough).await?;
                 yield prediction;
             }
         };
@@ -387,6 +395,7 @@ impl PredictionService {
                 &entry.tag,
                 Some(inputs),
                 Some(entry.acceleration.clone()),
+                None,
                 None,
                 None,
                 None,
@@ -788,6 +797,7 @@ fn serialize_inputs(inputs: &HashMap<String, Value>) -> Result<serde_json::Value
 
 pub(crate) fn create_remote_value(value: &Value) -> Result<RemoteValue> {
     match value {
+        Value::Remote(remote) => Ok(remote.clone()),
         Value::Null => Ok(RemoteValue {
             data: None,
             dtype: Dtype::Null,
@@ -914,7 +924,7 @@ async fn download_value_data(client: &dyn Client, url: &str) -> Result<Vec<u8>> 
     client.fetch(url).await
 }
 
-async fn parse_remote_value(client: &dyn Client, rv: &RemoteValue) -> Result<Value> {
+pub(crate) async fn parse_remote_value(client: &dyn Client, rv: &RemoteValue) -> Result<Value> {
     if let Some(RemoteData::Sequence(items)) = &rv.data {
         if rv.dtype != Dtype::ImageList || items.len() > 1024 {
             return Err(MunaError::InvalidInput(
@@ -998,32 +1008,41 @@ async fn parse_remote_value(client: &dyn Client, rv: &RemoteValue) -> Result<Val
     }
 }
 
+/// Only the execution boundary resolves encoded inputs. Native FFI never
+/// receives Remote values, while remote serialization preserves them exactly.
+async fn deserialize_inputs(
+    client: &dyn Client,
+    inputs: HashMap<String, Value>,
+) -> Result<HashMap<String, Value>> {
+    let mut decoded = HashMap::with_capacity(inputs.len());
+    for (name, value) in inputs {
+        let value = match value {
+            Value::Remote(remote) => parse_remote_value(client, &remote).await?,
+            native => native,
+        };
+        decoded.insert(name, value);
+    }
+    Ok(decoded)
+}
+
 async fn parse_remote_prediction(
     client: &dyn Client,
-    prediction: RemotePrediction,
+    mut prediction: Prediction,
+    passthrough: bool,
 ) -> Result<Prediction> {
-    let results = match prediction.results {
-        Some(remote_values) => {
-            let mut values = Vec::with_capacity(remote_values.len());
-            for rv in &remote_values {
-                values.push(parse_remote_value(client, rv).await?);
+    if !passthrough {
+        if let Some(results) = prediction.results.take() {
+            let mut values = Vec::with_capacity(results.len());
+            for value in results {
+                values.push(match value {
+                    Value::Remote(remote) => parse_remote_value(client, &remote).await?,
+                    native => native,
+                });
             }
-            Some(values)
+            prediction.results = Some(values);
         }
-        None => None,
-    };
-    Ok(Prediction {
-        id: prediction.id,
-        tag: prediction.tag,
-        created: prediction.created,
-        configuration: None,
-        resources: None,
-        requirements: None,
-        results,
-        latency: prediction.latency,
-        error: prediction.error,
-        logs: prediction.logs,
-    })
+    }
+    Ok(prediction)
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
@@ -1175,6 +1194,38 @@ mod tests {
         async fn upload(&self, _path: &Path) -> Result<String> {
             Err(MunaError::Prediction("fake client has no API".into()))
         }
+    }
+
+    #[tokio::test]
+    async fn local_remote_inputs_decode_into_native_ffi_values() {
+        let client = FakeClient { cache_dir: PathBuf::new(), downloads: Default::default() };
+        let image = types::Image { data: vec![10, 20, 30], width: 1, height: 1, channels: 3 };
+        let bytes = c::Value::from_object(&Value::Image(image.clone())).unwrap()
+            .serialize(Some("image/png")).unwrap();
+        let child = RemoteValue { dtype: Dtype::Image, data: Some(upload_value_data(&bytes, "image/png").into()) };
+        let inputs = std::collections::HashMap::from([
+            ("text".into(), Value::Remote(super::create_remote_value(&Value::String("hello".into())).unwrap())),
+            ("tensor".into(), Value::Remote(super::create_remote_value(&Value::Tensor(types::Tensor {
+                data: types::TensorData::Float32(vec![1.0, 2.0]), shape: vec![2],
+            })).unwrap())),
+            ("images".into(), Value::Remote(RemoteValue {
+                dtype: Dtype::ImageList, data: Some(types::RemoteData::Sequence(vec![child.clone(), child])),
+            })),
+            ("null".into(), Value::Remote(RemoteValue { dtype: Dtype::Null, data: None })),
+            ("native".into(), Value::Int(7)),
+        ]);
+        let decoded = super::deserialize_inputs(&client, inputs).await.unwrap();
+        assert!(matches!(&decoded["text"], Value::String(text) if text == "hello"));
+        assert!(matches!(&decoded["images"], Value::ImageList(images) if images == &vec![image.clone(), image]));
+        assert!(matches!(&decoded["tensor"], Value::Tensor(tensor) if tensor.shape == [2]));
+        assert!(matches!(&decoded["null"], Value::Null));
+        assert!(matches!(&decoded["native"], Value::Int(7)));
+        // Exercise the real native conversion, without needing a published predictor.
+        c::ValueMap::from_dict(&decoded).unwrap();
+        let invalid = std::collections::HashMap::from([("bad".into(), Value::Remote(RemoteValue {
+            dtype: Dtype::Binary, data: Some("data:application/octet-stream;base64,!!!".to_string().into()),
+        }))]);
+        assert!(super::deserialize_inputs(&client, invalid).await.is_err());
     }
 
     #[tokio::test]
