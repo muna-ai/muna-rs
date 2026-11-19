@@ -76,7 +76,7 @@ impl Client for Transport {
 #[tokio::test]
 async fn chat_client_uses_cached_adapter_and_handles_missing_initial_role() {
     let signature = signature(
-        json!([{"name":"conversation","dtype":"list"}]),
+        json!([{"name":"conversation","dtype":"list","denotation":"openai.chat.completions.messages"}]),
         json!([
             {"name":"chunk","dtype":"dict","schema":{"title":"ChatCompletionChunk"}}
         ]),
@@ -198,4 +198,34 @@ fn response_schemas_are_reexported_without_duplicate_definitions() {
             .kind(),
         "openai.embeddings.create"
     );
+}
+
+#[tokio::test]
+async fn client_rejects_incompatible_signature_before_inference_and_caching() {
+    let client = Transport::new(signature(json!([]), json!([])), vec![]);
+    let muna = Muna::with_client(client.clone());
+    for _ in 0..2 {
+        let error = muna
+            .beta
+            .openai
+            .embeddings
+            .create(
+                vec!["Hello".into()],
+                "@test/model",
+                None,
+                None,
+                Some(Acceleration::RemoteAuto),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, muna::MunaError::InvalidInput(ref message) if message.contains("does not support embeddings"))
+        );
+    }
+    let requests = client.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(requests
+        .iter()
+        .all(|request| request.path.starts_with("/predictors/")));
 }

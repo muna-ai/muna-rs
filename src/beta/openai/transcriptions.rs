@@ -9,8 +9,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::beta::adapters::{
-    Adapter, AudioInput, OpenAITranscriptionsAdapter,
-    OpenAITranscriptionsOptions, Transcription,
+    Adapter, AudioInput, OpenAITranscriptionsAdapter, OpenAITranscriptionsOptions, Transcription,
 };
 use crate::client::{MunaError, Result};
 use crate::services::{PredictionService, PredictorService};
@@ -99,7 +98,12 @@ impl TranscriptionService {
         let predictor = self.predictors.retrieve(model).await?.ok_or_else(|| {
             MunaError::InvalidInput(format!("Predictor {model} could not be found"))
         })?;
-        let adapter = OpenAITranscriptionsAdapter::from_signature(&predictor.signature)?;
+        let adapter = OpenAITranscriptionsAdapter::from_signature(&predictor.signature)
+            .ok_or_else(|| {
+                MunaError::InvalidInput(format!(
+                    "Predictor {model} does not support audio transcription"
+                ))
+            })?;
         self.cache
             .write()
             .await

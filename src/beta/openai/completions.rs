@@ -10,8 +10,8 @@ use futures_util::StreamExt;
 use tokio::sync::RwLock;
 
 use crate::beta::adapters::{
-    Adapter, ChatCompletion, ChatCompletionCreateParams,
-    OpenAICompletionsAdapter, OpenAICompletionsOptions,
+    Adapter, ChatCompletion, ChatCompletionCreateParams, OpenAICompletionsAdapter,
+    OpenAICompletionsOptions,
 };
 use crate::client::{MunaError, Result};
 use crate::services::{PredictionService, PredictorService};
@@ -94,7 +94,12 @@ impl ChatCompletionService {
         let predictor = self.predictors.retrieve(model).await?.ok_or_else(|| {
             MunaError::InvalidInput(format!("Predictor {model} could not be found"))
         })?;
-        let adapter = OpenAICompletionsAdapter::from_signature(&predictor.signature)?;
+        let adapter =
+            OpenAICompletionsAdapter::from_signature(&predictor.signature).ok_or_else(|| {
+                MunaError::InvalidInput(format!(
+                    "Predictor {model} does not support chat completions"
+                ))
+            })?;
         self.cache
             .write()
             .await

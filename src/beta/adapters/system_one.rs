@@ -14,7 +14,7 @@ use crate::client::{MunaError, Result};
 use crate::types::{Acceleration, Device, Dtype, Parameter, Prediction, Signature, Value};
 
 use super::{
-    utils::{decode, output, parameter, require, result, validate_inputs},
+    utils::{decode, output, parameter, result, validate_inputs},
     Adapter,
 };
 
@@ -151,32 +151,26 @@ pub struct TypeSafeSystemOneAdapter {
 }
 
 impl TypeSafeSystemOneAdapter {
-    pub fn from_signature(signature: &Signature) -> Result<Self> {
+    /// Returns `None` when the signature is incompatible or ambiguous.
+    pub fn from_signature(signature: &Signature) -> Option<Self> {
         // State input.
-        let state = require(
-            parameter(
-                &signature.inputs,
-                &[Dtype::List],
-                Some("typesafe.systemone.state"),
-            )?,
-            "Requires one list state input",
-        )?;
+        let state = parameter(
+            &signature.inputs,
+            &[Dtype::List],
+            Some("typesafe.systemone.state"),
+        )
+        .ok()??;
         // Questions input.
-        let questions = require(
-            parameter(
-                &signature.inputs,
-                &[Dtype::Dict],
-                Some("typesafe.systemone.questions"),
-            )?,
-            "Requires one dictionary questions input",
-        )?;
-        validate_inputs(signature, &[Some(&state), Some(&questions)])?;
+        let questions = parameter(
+            &signature.inputs,
+            &[Dtype::Dict],
+            Some("typesafe.systemone.questions"),
+        )
+        .ok()??;
+        validate_inputs(signature, &[Some(&state), Some(&questions)]).ok()?;
         // Typed response output.
-        let output = require(
-            output(signature, &[Dtype::Dict], "SystemOneResponse")?,
-            "Requires one SystemOneResponse output",
-        )?;
-        Ok(Self {
+        let output = output(signature, &[Dtype::Dict], "SystemOneResponse").ok()??;
+        Some(Self {
             state,
             questions,
             output,

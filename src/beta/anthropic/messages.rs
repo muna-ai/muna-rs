@@ -69,7 +69,12 @@ impl MessageService {
         let predictor = self.predictors.retrieve(model).await?.ok_or_else(|| {
             MunaError::InvalidInput(format!("Predictor {model} could not be found"))
         })?;
-        let adapter = AnthropicMessagesAdapter::from_signature(&predictor.signature)?;
+        let adapter =
+            AnthropicMessagesAdapter::from_signature(&predictor.signature).ok_or_else(|| {
+                MunaError::InvalidInput(format!(
+                    "Predictor {model} does not support Anthropic messages"
+                ))
+            })?;
         self.cache
             .write()
             .await

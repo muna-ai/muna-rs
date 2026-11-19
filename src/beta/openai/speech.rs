@@ -9,8 +9,8 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::beta::adapters::{
-    Adapter, OpenAISpeechAdapter, OpenAISpeechOptions, SpeechCreateResponse,
-    SpeechResponseFormat, SpeechStreamFormat,
+    Adapter, OpenAISpeechAdapter, OpenAISpeechOptions, SpeechCreateResponse, SpeechResponseFormat,
+    SpeechStreamFormat,
 };
 use crate::client::{MunaError, Result};
 use crate::services::{PredictionService, PredictorService};
@@ -93,7 +93,12 @@ impl SpeechService {
         let predictor = self.predictors.retrieve(model).await?.ok_or_else(|| {
             MunaError::InvalidInput(format!("Predictor {model} could not be found"))
         })?;
-        let adapter = OpenAISpeechAdapter::from_signature(&predictor.signature)?;
+        let adapter =
+            OpenAISpeechAdapter::from_signature(&predictor.signature).ok_or_else(|| {
+                MunaError::InvalidInput(format!(
+                    "Predictor {model} does not support speech generation"
+                ))
+            })?;
         self.cache
             .write()
             .await

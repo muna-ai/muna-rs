@@ -14,7 +14,7 @@ use crate::types::{Dtype, Parameter, Prediction, Signature, Value};
 
 use super::audio::validate_samples;
 use super::{
-    utils::{decode, get_parameter, parameter, require, required, result, validate_inputs, FLOATS},
+    utils::{decode, get_parameter, parameter, required, result, validate_inputs, FLOATS},
     Adapter,
 };
 
@@ -74,38 +74,29 @@ pub struct OpenAISpeechAdapter {
 }
 
 impl OpenAISpeechAdapter {
-    pub fn from_signature(signature: &Signature) -> Result<Self> {
+    /// Returns `None` when the signature is incompatible or ambiguous.
+    pub fn from_signature(signature: &Signature) -> Option<Self> {
         // Voice input.
         let required = required(&signature.inputs);
-        let voice = require(
-            parameter(
-                &required,
-                &[Dtype::String],
-                Some("openai.audio.speech.voice"),
-            )?,
-            "Requires one required string input annotated as speech voice",
-        )?;
+        let voice = parameter(
+            &required,
+            &[Dtype::String],
+            Some("openai.audio.speech.voice"),
+        )
+        .ok()??;
         // Voice is also a string; exclude it from the text lookup.
         let remaining = required
             .into_iter()
             .filter(|parameter| parameter.name != voice.name)
             .collect::<Vec<_>>();
-        let input = require(
-            parameter(&remaining, &[Dtype::String], None)?,
-            "Requires one required speech text input",
-        )?;
-        let speed = parameter(&signature.inputs, FLOATS, Some("openai.audio.speech.speed"))?;
-        validate_inputs(signature, &[Some(&input), Some(&voice), speed.as_ref()])?;
+        let input = parameter(&remaining, &[Dtype::String], None).ok()??;
+        let speed = parameter(&signature.inputs, FLOATS, Some("openai.audio.speech.speed")).ok()?;
+        validate_inputs(signature, &[Some(&input), Some(&voice), speed.as_ref()]).ok()?;
         // Audio output.
-        let (output, audio) = require(
-            get_parameter(&signature.outputs, &[Dtype::Float32], Some("audio"))?,
-            "Requires one float32 output annotated as audio",
-        )?;
-        let sample_rate = require(
-            audio.sample_rate.filter(|rate| *rate > 0),
-            "Speech audio output must declare a positive sample rate",
-        )?;
-        Ok(Self {
+        let (output, audio) =
+            get_parameter(&signature.outputs, &[Dtype::Float32], Some("audio")).ok()??;
+        let sample_rate = audio.sample_rate.filter(|rate| *rate > 0)?;
+        Some(Self {
             input,
             voice,
             output,

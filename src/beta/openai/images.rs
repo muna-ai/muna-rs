@@ -9,8 +9,8 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::beta::adapters::{
-    Adapter, ImageResponse, OpenAIImageEditAdapter,
-    OpenAIImageGenerationAdapter, OpenAIImageOptions,
+    Adapter, ImageResponse, OpenAIImageEditAdapter, OpenAIImageGenerationAdapter,
+    OpenAIImageOptions,
 };
 use crate::client::{MunaError, Result};
 use crate::services::{PredictionService, PredictorService};
@@ -117,7 +117,13 @@ impl ImageService {
                                 params.model
                             ))
                         })?;
-                let adapter = OpenAIImageGenerationAdapter::from_signature(&predictor.signature)?;
+                let adapter = OpenAIImageGenerationAdapter::from_signature(&predictor.signature)
+                    .ok_or_else(|| {
+                        MunaError::InvalidInput(format!(
+                            "Predictor {} does not support image generation",
+                            params.model
+                        ))
+                    })?;
                 self.generations
                     .write()
                     .await
@@ -166,7 +172,13 @@ impl ImageService {
                                 params.model
                             ))
                         })?;
-                let adapter = OpenAIImageEditAdapter::from_signature(&predictor.signature)?;
+                let adapter = OpenAIImageEditAdapter::from_signature(&predictor.signature)
+                    .ok_or_else(|| {
+                        MunaError::InvalidInput(format!(
+                            "Predictor {} does not support image editing",
+                            params.model
+                        ))
+                    })?;
                 self.edits
                     .write()
                     .await

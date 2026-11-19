@@ -13,7 +13,7 @@ use super::common::*;
 fn chat_signature() -> muna::Signature {
     signature(
         json!([
-            {"name":"conversation", "dtype":"list"},
+            {"name":"conversation", "dtype":"list", "denotation":"openai.chat.completions.messages"},
             {"name":"pictures", "dtype":"image_list", "optional":true, "denotation":"openai.chat.completions.images"},
             {"name":"heat", "dtype":"float64", "optional":true, "denotation":"openai.chat.completions.temperature"},
             {"name":"budget", "dtype":"int32", "optional":true, "denotation":"openai.chat.completions.max_output_tokens"}
@@ -41,13 +41,13 @@ fn chat_retains_remote_images_and_binds_explicit_parameters() {
 fn chat_rejects_ambiguous_outputs_and_extra_required_inputs() {
     let mut signature = chat_signature();
     signature.outputs.push(signature.outputs[0].clone());
-    assert!(OpenAICompletionsAdapter::from_signature(&signature).is_err());
+    assert!(OpenAICompletionsAdapter::from_signature(&signature).is_none());
     signature.outputs.pop();
     signature.inputs[1].optional = Some(false);
     // A required images field is supported; an unrelated required field is not.
     signature.inputs[1].denotation = None;
-    assert!(OpenAICompletionsAdapter::from_signature(&signature).is_err());
-    assert!(AnthropicMessagesAdapter::from_signature(&signature).is_err());
+    assert!(OpenAICompletionsAdapter::from_signature(&signature).is_none());
+    assert!(AnthropicMessagesAdapter::from_signature(&signature).is_none());
 }
 
 #[tokio::test]

@@ -79,7 +79,7 @@ fn merge_accumulates_reasoning_and_content() {
 fn delegate_info() -> OpenAICompletionsAdapter {
     OpenAICompletionsAdapter::from_signature(
         &serde_json::from_value(json!({
-            "inputs": [{"name":"messages", "dtype":"list"}],
+            "inputs": [{"name":"messages", "dtype":"list", "denotation":"openai.chat.completions.messages"}],
             "outputs": [{"name":"chunk", "dtype":"dict", "schema":{"title":"ChatCompletionChunk"}}]
         }))
         .unwrap(),

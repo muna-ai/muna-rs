@@ -65,7 +65,12 @@ impl TypeSafeClient {
         let predictor = self.predictors.retrieve(model).await?.ok_or_else(|| {
             MunaError::InvalidInput(format!("Predictor {model} could not be found"))
         })?;
-        let adapter = TypeSafeSystemOneAdapter::from_signature(&predictor.signature)?;
+        let adapter =
+            TypeSafeSystemOneAdapter::from_signature(&predictor.signature).ok_or_else(|| {
+                MunaError::InvalidInput(format!(
+                    "Predictor {model} does not support TypeSafe System One"
+                ))
+            })?;
         self.cache
             .write()
             .await

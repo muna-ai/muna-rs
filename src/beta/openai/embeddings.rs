@@ -9,8 +9,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::beta::adapters::{
-    Adapter, EmbeddingCreateResponse, OpenAIEmbeddingsAdapter,
-    OpenAIEmbeddingsOptions,
+    Adapter, EmbeddingCreateResponse, OpenAIEmbeddingsAdapter, OpenAIEmbeddingsOptions,
 };
 use crate::client::{MunaError, Result};
 use crate::services::{PredictionService, PredictorService};
@@ -74,7 +73,10 @@ impl EmbeddingService {
         let predictor = self.predictors.retrieve(model).await?.ok_or_else(|| {
             MunaError::InvalidInput(format!("Predictor {model} could not be found"))
         })?;
-        let adapter = OpenAIEmbeddingsAdapter::from_signature(&predictor.signature)?;
+        let adapter =
+            OpenAIEmbeddingsAdapter::from_signature(&predictor.signature).ok_or_else(|| {
+                MunaError::InvalidInput(format!("Predictor {model} does not support embeddings"))
+            })?;
         self.cache
             .write()
             .await

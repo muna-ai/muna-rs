@@ -15,8 +15,7 @@ pub use super::edits::ImageInput;
 use super::images::ImageResponse;
 use super::{
     utils::{
-        created, decode, get_parameter, inline_base64, parameter,
-        require, result, validate_inputs, INTEGERS,
+        created, decode, get_parameter, inline_base64, parameter, result, validate_inputs, INTEGERS,
     },
     Adapter,
 };
@@ -33,54 +32,45 @@ pub struct OpenAIDepthAdapter {
 }
 
 impl OpenAIDepthAdapter {
-    pub fn from_signature(signature: &Signature) -> Result<Self> {
+    /// Returns `None` when the signature is incompatible or ambiguous.
+    pub fn from_signature(signature: &Signature) -> Option<Self> {
         // Prompt parameter.
-        let prompt = require(
-            parameter(
-                &signature.inputs,
-                &[Dtype::String],
-                Some("openai.images.prompt"),
-            )?,
-            "Requires one scalar string input annotated with ImagePrompt",
-        )?;
+        let prompt = parameter(
+            &signature.inputs,
+            &[Dtype::String],
+            Some("openai.images.prompt"),
+        )
+        .ok()??;
         // Images parameter. An unannotated image input is not a match.
-        let images = require(
-            parameter(
-                &signature.inputs,
-                &[Dtype::ImageList],
-                Some("openai.chat.completions.images"),
-            )?,
-            "Requires one image_list input annotated with ChatImages",
-        )?;
+        let images = parameter(
+            &signature.inputs,
+            &[Dtype::ImageList],
+            Some("openai.chat.completions.images"),
+        )
+        .ok()??;
         // Optional generation width.
-        let width = parameter(&signature.inputs, INTEGERS, Some("openai.images.width"))?;
+        let width = parameter(&signature.inputs, INTEGERS, Some("openai.images.width")).ok()?;
         if width
             .as_ref()
             .is_some_and(|parameter| parameter.optional != Some(true))
         {
-            return Err(MunaError::InvalidInput(
-                "Image `width` input must be optional".into(),
-            ));
+            return None;
         }
         // Optional generation height.
-        let height = parameter(&signature.inputs, INTEGERS, Some("openai.images.height"))?;
+        let height = parameter(&signature.inputs, INTEGERS, Some("openai.images.height")).ok()?;
         if height
             .as_ref()
             .is_some_and(|parameter| parameter.optional != Some(true))
         {
-            return Err(MunaError::InvalidInput(
-                "Image `height` input must be optional".into(),
-            ));
+            return None;
         }
         // Optional generation count.
-        let count = parameter(&signature.inputs, INTEGERS, Some("openai.images.count"))?;
+        let count = parameter(&signature.inputs, INTEGERS, Some("openai.images.count")).ok()?;
         if count
             .as_ref()
             .is_some_and(|parameter| parameter.optional != Some(true))
         {
-            return Err(MunaError::InvalidInput(
-                "Image `count` input must be optional".into(),
-            ));
+            return None;
         }
         validate_inputs(
             signature,
@@ -91,13 +81,12 @@ impl OpenAIDepthAdapter {
                 height.as_ref(),
                 count.as_ref(),
             ],
-        )?;
+        )
+        .ok()?;
         // Depth map output.
-        let (output, _) = require(
-            get_parameter(&signature.outputs, &[Dtype::ArrayList], Some("depth_map"))?,
-            "Requires one unambiguous depth_map array_list output",
-        )?;
-        Ok(Self {
+        let (output, _) =
+            get_parameter(&signature.outputs, &[Dtype::ArrayList], Some("depth_map")).ok()??;
+        Some(Self {
             prompt,
             images,
             output,

@@ -24,18 +24,18 @@ fn image_signature() -> muna::Signature {
 #[test]
 fn edit_requires_annotations_and_a_list() {
     let original = image_signature();
-    assert!(OpenAIImageEditAdapter::from_signature(&original).is_ok());
+    assert!(OpenAIImageEditAdapter::from_signature(&original).is_some());
     for index in [0, 1] {
         let mut invalid = original.clone();
         invalid.inputs[index].denotation = None;
-        assert!(OpenAIImageEditAdapter::from_signature(&invalid).is_err());
+        assert!(OpenAIImageEditAdapter::from_signature(&invalid).is_none());
     }
     let mut invalid = original.clone();
     invalid.inputs[1].dtype = Some(Dtype::Image);
-    assert!(OpenAIImageEditAdapter::from_signature(&invalid).is_err());
+    assert!(OpenAIImageEditAdapter::from_signature(&invalid).is_none());
     let mut ambiguous = original;
     ambiguous.inputs.push(ambiguous.inputs[1].clone());
-    assert!(OpenAIImageEditAdapter::from_signature(&ambiguous).is_err());
+    assert!(OpenAIImageEditAdapter::from_signature(&ambiguous).is_none());
 }
 
 #[test]
@@ -66,14 +66,14 @@ fn edits_preserve_encoded_inputs_and_leave_dimensions_to_predictor() {
 #[test]
 fn generation_requires_prompt_and_rejects_extra_required_inputs() {
     let mut signature = image_signature();
-    assert!(OpenAIImageGenerationAdapter::from_signature(&signature).is_err());
+    assert!(OpenAIImageGenerationAdapter::from_signature(&signature).is_none());
     signature.inputs.remove(1);
     let adapter = OpenAIImageGenerationAdapter::from_signature(&signature).unwrap();
     let inputs = adapter.inputs("draw".into(), None, Some(100), None);
     assert!(matches!(&inputs["caption"], Value::String(prompt) if prompt == "draw"));
     assert!(matches!(inputs["w"], Value::Int(100)));
     signature.inputs[0].denotation = None;
-    assert!(OpenAIImageGenerationAdapter::from_signature(&signature).is_err());
+    assert!(OpenAIImageGenerationAdapter::from_signature(&signature).is_none());
 }
 
 #[tokio::test]
@@ -174,5 +174,5 @@ async fn depth_produces_lossless_npy_and_npz() {
         }
     }
     signature.inputs[1].denotation = None;
-    assert!(OpenAIDepthAdapter::from_signature(&signature).is_err());
+    assert!(OpenAIDepthAdapter::from_signature(&signature).is_none());
 }

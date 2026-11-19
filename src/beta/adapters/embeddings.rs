@@ -14,8 +14,7 @@ use crate::types::{Dtype, Parameter, Prediction, Signature, Value};
 
 use super::{
     utils::{
-        decode, get_parameter, output, parameter, require, required,
-        result, validate_inputs, INTEGERS,
+        decode, get_parameter, output, parameter, required, result, validate_inputs, INTEGERS,
     },
     Adapter,
 };
@@ -79,22 +78,19 @@ pub struct OpenAIEmbeddingsAdapter {
 }
 
 impl OpenAIEmbeddingsAdapter {
-    pub fn from_signature(signature: &Signature) -> Result<Self> {
+    /// Returns `None` when the signature is incompatible or ambiguous.
+    pub fn from_signature(signature: &Signature) -> Option<Self> {
         // Text input.
-        let input = require(
-            parameter(&required(&signature.inputs), &[Dtype::List], None)?,
-            "Requires one required list input for embedding text",
-        )?;
+        let input = parameter(&required(&signature.inputs), &[Dtype::List], None).ok()??;
         // Matryoshka dimensions.
-        let dimensions = parameter(&signature.inputs, INTEGERS, Some("openai.embeddings.dims"))?;
-        validate_inputs(signature, &[Some(&input), dimensions.as_ref()])?;
+        let dimensions =
+            parameter(&signature.inputs, INTEGERS, Some("openai.embeddings.dims")).ok()?;
+        validate_inputs(signature, &[Some(&input), dimensions.as_ref()]).ok()?;
         // Embedding matrix and optional token usage.
-        let (output, _) = require(
-            get_parameter(&signature.outputs, &[Dtype::Float32], Some("embedding"))?,
-            "Requires one float32 output annotated as embedding",
-        )?;
-        let usage = output_usage(signature)?;
-        Ok(Self {
+        let (output, _) =
+            get_parameter(&signature.outputs, &[Dtype::Float32], Some("embedding")).ok()??;
+        let usage = output_usage(signature).ok()?;
+        Some(Self {
             input,
             output,
             dimensions,

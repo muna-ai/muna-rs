@@ -107,5 +107,5 @@ async fn invalid_embedding_shapes_and_usage_return_errors() {
 fn embedding_signatures_reject_duplicate_optional_bindings() {
     let mut signature = embedding_signature();
     signature.inputs.push(signature.inputs[1].clone());
-    assert!(OpenAIEmbeddingsAdapter::from_signature(&signature).is_err());
+    assert!(OpenAIEmbeddingsAdapter::from_signature(&signature).is_none());
 }

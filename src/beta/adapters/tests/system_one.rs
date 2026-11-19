@@ -212,7 +212,7 @@ fn rejects_predictors_without_the_contract() {
             }
         ]),
     );
-    assert!(TypeSafeSystemOneAdapter::from_signature(&missing_questions).is_err());
+    assert!(TypeSafeSystemOneAdapter::from_signature(&missing_questions).is_none());
     let missing_output = signature(
         json!([
             {
@@ -228,5 +228,5 @@ fn rejects_predictors_without_the_contract() {
         ]),
         json!([{ "name": "result", "dtype": "dict", "schema": { "title": "Other" } }]),
     );
-    assert!(TypeSafeSystemOneAdapter::from_signature(&missing_output).is_err());
+    assert!(TypeSafeSystemOneAdapter::from_signature(&missing_output).is_none());
 }

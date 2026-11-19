@@ -60,36 +60,35 @@ pub struct OpenAITranscriptionsAdapter {
 }
 
 impl OpenAITranscriptionsAdapter {
-    pub fn from_signature(signature: &Signature) -> Result<Self> {
+    /// Returns `None` when the signature is incompatible or ambiguous.
+    pub fn from_signature(signature: &Signature) -> Option<Self> {
         // Audio input.
-        let audio = require(
-            parameter(
-                &required(&signature.inputs),
-                &[Dtype::Float32, Dtype::ArrayList],
-                Some("audio"),
-            )?,
-            "Requires one required float32 or array_list audio input",
-        )?;
-        require(
-            audio.sample_rate.filter(|rate| *rate > 0),
-            "Transcription input must declare a positive sample rate",
-        )?;
+        let audio = parameter(
+            &required(&signature.inputs),
+            &[Dtype::Float32, Dtype::ArrayList],
+            Some("audio"),
+        )
+        .ok()??;
+        audio.sample_rate.filter(|rate| *rate > 0)?;
         // Optional language, prompt, and temperature.
         let language = parameter(
             &signature.inputs,
             &[Dtype::String],
             Some("openai.audio.transcriptions.language"),
-        )?;
+        )
+        .ok()?;
         let prompt = parameter(
             &signature.inputs,
             &[Dtype::String],
             Some("openai.audio.transcriptions.prompt"),
-        )?;
+        )
+        .ok()?;
         let temperature = parameter(
             &signature.inputs,
             FLOATS,
             Some("openai.chat.completions.temperature"),
-        )?;
+        )
+        .ok()?;
         validate_inputs(
             signature,
             &[
@@ -98,14 +97,13 @@ impl OpenAITranscriptionsAdapter {
                 prompt.as_ref(),
                 temperature.as_ref(),
             ],
-        )?;
+        )
+        .ok()?;
         // Text output and optional reported usage.
-        let (output, _) = require(
-            get_parameter(&signature.outputs, &[Dtype::String, Dtype::List], None)?,
-            "Requires one string or list transcription output",
-        )?;
-        let usage = super::utils::output(signature, &[Dtype::Dict], "Usage")?;
-        Ok(Self {
+        let (output, _) =
+            get_parameter(&signature.outputs, &[Dtype::String, Dtype::List], None).ok()??;
+        let usage = super::utils::output(signature, &[Dtype::Dict], "Usage").ok()?;
+        Some(Self {
             audio,
             output,
             usage,

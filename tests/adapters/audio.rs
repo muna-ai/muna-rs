@@ -165,8 +165,8 @@ async fn speech_binds_voice_first_and_encodes_pcm_and_wav() {
 fn audio_signatures_reject_ambiguous_and_missing_sample_rates() {
     let mut signature = transcription_signature("float32", false);
     signature.inputs[0].sample_rate = None;
-    assert!(OpenAITranscriptionsAdapter::from_signature(&signature).is_err());
+    assert!(OpenAITranscriptionsAdapter::from_signature(&signature).is_none());
     signature.inputs[0].sample_rate = Some(16000);
     signature.outputs.push(signature.outputs[0].clone());
-    assert!(OpenAITranscriptionsAdapter::from_signature(&signature).is_err());
+    assert!(OpenAITranscriptionsAdapter::from_signature(&signature).is_none());
 }

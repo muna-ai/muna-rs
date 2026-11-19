@@ -52,84 +52,99 @@ pub struct OpenAICompletionsAdapter {
 }
 
 impl OpenAICompletionsAdapter {
-    pub fn from_signature(signature: &Signature) -> Result<Self> {
+    /// Returns `None` when the signature is incompatible or ambiguous.
+    pub fn from_signature(signature: &Signature) -> Option<Self> {
         // Required conversation input.
-        let messages = require(
-            parameter(&required(&signature.inputs), &[Dtype::List], None)?,
-            "Chat requires one required messages list input",
-        )?;
+        let messages = parameter(
+            &required(&signature.inputs),
+            &[Dtype::List],
+            Some("openai.chat.completions.messages"),
+        )
+        .ok()??;
         // Images parameter.
         let images = parameter(
             &signature.inputs,
             &[Dtype::ImageList],
             Some("openai.chat.completions.images"),
-        )?;
+        )
+        .ok()?;
         // Audios parameter.
         let audios = parameter(
             &signature.inputs,
             &[Dtype::ArrayList],
             Some("openai.chat.completions.audios"),
-        )?;
+        )
+        .ok()?;
         // Temperature parameter.
         let temperature = parameter(
             &signature.inputs,
             FLOATS,
             Some("openai.chat.completions.temperature"),
-        )?;
+        )
+        .ok()?;
         // Top p parameter.
         let top_p = parameter(
             &signature.inputs,
             FLOATS,
             Some("openai.chat.completions.top_p"),
-        )?;
+        )
+        .ok()?;
         // Seed parameter.
         let seed = parameter(
             &signature.inputs,
             INTEGERS,
             Some("openai.chat.completions.seed"),
-        )?;
+        )
+        .ok()?;
         // Max completion tokens parameter.
         let max_completion_tokens = parameter(
             &signature.inputs,
             INTEGERS,
             Some("openai.chat.completions.max_output_tokens"),
-        )?;
+        )
+        .ok()?;
         // Frequency penalty parameter.
         let frequency_penalty = parameter(
             &signature.inputs,
             FLOATS,
             Some("openai.chat.completions.frequency_penalty"),
-        )?;
+        )
+        .ok()?;
         // Presence penalty parameter.
         let presence_penalty = parameter(
             &signature.inputs,
             FLOATS,
             Some("openai.chat.completions.presence_penalty"),
-        )?;
+        )
+        .ok()?;
         // Response format parameter.
         let response_format = parameter(
             &signature.inputs,
             &[Dtype::Dict],
             Some("openai.chat.completions.response_format"),
-        )?;
+        )
+        .ok()?;
         // Reasoning effort parameter.
         let reasoning_effort = parameter(
             &signature.inputs,
             &[Dtype::String],
             Some("openai.chat.completions.reasoning_effort"),
-        )?;
+        )
+        .ok()?;
         // Tools parameter.
         let tools = parameter(
             &signature.inputs,
             &[Dtype::List],
             Some("openai.chat.completions.tools"),
-        )?;
+        )
+        .ok()?;
         // Stop parameter.
         let stop = parameter(
             &signature.inputs,
             &[Dtype::List],
             Some("openai.chat.completions.stop"),
-        )?;
+        )
+        .ok()?;
         validate_inputs(
             signature,
             &[
@@ -147,21 +162,17 @@ impl OpenAICompletionsAdapter {
                 tools.as_ref(),
                 stop.as_ref(),
             ],
-        )?;
+        )
+        .ok()?;
         if audios
             .as_ref()
             .is_some_and(|parameter| parameter.sample_rate.is_none_or(|rate| rate == 0))
         {
-            return Err(MunaError::InvalidInput(
-                "Chat audio input must declare a positive sample rate".into(),
-            ));
+            return None;
         }
         // Predictors yield the same chunk schema for both API dialects.
-        let output = require(
-            output(signature, &[Dtype::Dict], "ChatCompletionChunk")?,
-            "Chat requires one ChatCompletionChunk dictionary output",
-        )?;
-        Ok(Self {
+        let output = output(signature, &[Dtype::Dict], "ChatCompletionChunk").ok()??;
+        Some(Self {
             messages,
             output,
             images,

@@ -1,5 +1,5 @@
 ## 0.0.40
-*INCOMPLETE*
++ Upgraded Function to 0.0.53.
 
 ## 0.0.39
 + Minor improvements.
@@ -11,7 +11,7 @@
 + Added `muna.beta.openai.images.edit` method for use with generative image models that edit images.
 
 ## 0.0.36
-+ Updated Function to 0.0.52.
++ Upgraded Function to 0.0.52.
 
 ## 0.0.35
 + Added OpenAI-compatible `muna.beta.openai.audio.speech` speech generation client.
@@ -24,7 +24,7 @@
 + Added `compute_architecture` parameter to `muna.predictions.create` method for overriding the detected compute architecture (e.g. `sm_100`, `gfx942`, `metal4`).
 + Renamed `client_id` parameter in `muna.predictions.create` method to `target`.
 + Removed `PredictionRequirements::gpu_architecture` field. The compute architecture is now requested by the client instead of reported by the predictor.
-+ Updated Function to 0.0.51.
++ Upgraded Function to 0.0.51.
 
 ## 0.0.32
 + Added `PredictionResource::size` field for the resource size in bytes.
