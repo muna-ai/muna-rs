@@ -15,6 +15,8 @@ mod common;
 mod embeddings;
 #[path = "adapters/images.rs"]
 mod images;
+#[path = "adapters/model3d.rs"]
+mod model3d;
 #[path = "adapters/matching.rs"]
 mod matching;
 #[path = "adapters/system_one.rs"]

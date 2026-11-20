@@ -229,3 +229,56 @@ async fn client_rejects_incompatible_signature_before_inference_and_caching() {
         .iter()
         .all(|request| request.path.starts_with("/predictors/")));
 }
+
+#[tokio::test]
+async fn model3d_client_caches_the_adapter_and_rejects_raster_encoding_before_inference() {
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+    let signature = signature(
+        json!([
+            {"name":"caption","dtype":"string","denotation":"openai.images.prompt","optional":true},
+            {"name":"pictures","dtype":"image_list","denotation":"openai.chat.completions.images"}
+        ]),
+        json!([{"name":"output","dtype":"binary","denotation":"3d"}]),
+    );
+    let payload = BASE64.encode(b"ply\nformat ascii 1.0\nelement vertex 0\nend_header\n");
+    let client = Transport::new(
+        signature,
+        vec![muna::Value::Remote(muna::RemoteValue {
+            dtype: muna::Dtype::Binary,
+            data: Some(format!("data:application/octet-stream;base64,{payload}").into()),
+        })],
+    );
+    let muna = Muna::with_client(client.clone());
+    let params = ImageEditParams {
+        model: "@test/model".into(),
+        image: vec![adapters::ImageInput::Encoded(vec![1, 2, 3])],
+        acceleration: Some(Acceleration::RemoteAuto),
+        ..Default::default()
+    };
+    for _ in 0..2 {
+        let response = muna.beta.openai.images.edit(params.clone()).await.unwrap();
+        assert_eq!(
+            response.data.unwrap()[0].b64_json.as_deref(),
+            Some(payload.as_str())
+        );
+    }
+    assert!(muna
+        .beta
+        .openai
+        .images
+        .edit(ImageEditParams {
+            output_format: Some("png".into()),
+            ..params
+        })
+        .await
+        .is_err());
+    let requests = client.requests.lock().unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.path.starts_with("/predictors/"))
+            .count(),
+        1
+    );
+    assert_eq!(requests.len(), 3);
+}
